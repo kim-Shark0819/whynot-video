@@ -23,12 +23,19 @@ start·end 는 estimate_spans 한 곳에서 정한다(컷 구간 → 그 안 말
 작업 212(대사 고치기, line_redo.py): 원본(_source)은 기준(_base_source — ⑦ 내보내기 → ⑤ 완성본) 위에 대사 다시 만든 판(kind redo, 기준과 시간이
 같다)이 있으면 그 판이다. 판끼리 바뀌면 줄 시간을 이어 받고, 컷 구간은 기준 종류로 잰다. versions[].outdated(있을 때만)는 판이 바뀌어 그 반영이
 지금 원본과 맞지 않음을 뜻한다(자동으로 다시 반영하지 않는다). GET 보기에는 lineRedo(VNEW_LINE_REDO 켬)가 붙는다.
+
+작업 224(대사별 내려받기): ⑥ 이 보이는 소리(고른 반영본 v{n}, 없으면 원본 _source)를 사운드 문서의 줄 구간(앞 0.15초 · 뒤 0.25초,
+이웃 줄과 가운데에서 끊는다)으로 잘라 줄마다 mp3(48kHz · 192kbps)로 준다. 그 원본에 217 분리된 목소리가 있으면(낡지 않았으면) 그 목소리를
+자른다. 한 줄 = mp3 하나, 여러 줄 = zip(mp3 + 대사목록.csv + README.txt). 결과는 새 키({gen 루트}/sound/lines/…)에만 쓰고, 같은 키가
+있으면 다시 만들지 않는다. 문서·대본·원본은 읽기만 한다. 유료 호출 · 원장 0.
 """
 
 from __future__ import annotations
 
 import copy
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -36,10 +43,13 @@ import re
 import secrets
 import tempfile
 import threading
+import zipfile
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from .. import stitcher
 from ..vpoc import settings as vpoc_settings
+from ..vpoc import store as vpoc_store
 from ..vpoc.errors import VpocError, error_gist, now_iso
 
 from . import edit
@@ -894,3 +904,352 @@ def reconcile_job(owner: str, pid: str, gen_id: str, variant: str) -> bool:
     if box:
         log.warning("vnew.sound.apply_abandoned pid=%s gen=%s variant=%s", pid, gen_id, variant)
     return bool(box)
+
+
+# ================================================================ 작업 224: 대사별 내려받기(줄 하나 mp3 · 여러 줄 zip)
+#
+# 이미 있는 소리를 자르기만 한다(모델 · 유료 호출 · 원장 0). 원본 = ⑥ 이 보이는 소리(고른 반영본 v{n}, n 이 없으면 최신, n=0 이면 원본 _source).
+# 줄 구간 = 사운드 문서 lines[].start·end(212 대사 고치기 · 202 목소리와 같은 값). 문서가 없거나 낡았으면 _make_doc 으로 메모리에서만
+# 만든다(저장하지 않는다). 결과는 새 키 {gen 루트}/sound/lines/<variant>-v<n>-<sha8>.<zip|mp3>(영상 버킷)에만 쓰고, 그 키가 있으면 다시 만들지 않는다.
+
+LINES_PAD_BEFORE_S = 0.15
+LINES_PAD_AFTER_S = 0.25
+LINES_MIN_S = 0.05
+LINES_MAX = 200
+LINES_MAX_SOURCE_S = 900.0  # 15분
+LINES_RATE = 48000
+LINES_BITRATE = "192k"
+LINES_NAME_TEXT = 16  # 파일 이름에 넣는 대사 앞 글자 수
+LINES_NO_LINES = "내려받을 대사가 없습니다."
+LINES_NO_SOURCE = "소리 원본을 찾지 못했습니다. 영상을 먼저 만들어 주세요."
+LINES_CSV = "대사목록.csv"
+LINES_README = "README.txt"
+LINES_VARIANT_NAMES = {"webtoon": "anime", "real": "real"}
+_LINES_BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
+_LINES_N_RE = re.compile(r"^\d{1,6}$")
+_LINES_README_TEXT = (
+    "대사별 소리 파일\r\n"
+    "\r\n"
+    "- 파일 이름: 번호_말하는 사람_대사 앞부분.mp3 (48kHz, 192kbps)\r\n"
+    "- 대사목록.csv: 번호, 말하는 사람, 원본 영상 안 시작·끝(초), 대사\r\n"
+    "- 줄마다 앞 0.15초, 뒤 0.25초를 더 넣었습니다. 이웃 줄과는 겹치지 않습니다.\r\n"
+    "- 분리된 목소리를 쓰기로 한 영상이면 목소리만, 아니면 영상의 소리 그대로 잘랐습니다.\r\n"
+)
+
+
+def lines_prefix(owner: str, pid: str, gen_id: str) -> str:
+    return f"{edit._root(owner, pid, gen_id)}/sound/lines"  # noqa: SLF001
+
+
+def padded_spans(spans, duration: float) -> list[tuple[float, float]]:
+    """줄 구간 [(start, end)] → 내려받을 구간(같은 순서). 앞 LINES_PAD_BEFORE_S · 뒤 LINES_PAD_AFTER_S 를 더하고 [0, duration] 과
+    이웃 줄 가운데(앞 줄 끝 ~ 이 줄 시작의 가운데, 이 줄 끝 ~ 다음 줄 시작의 가운데)에서 끊는다 — 줄끼리 겹치지 않는다. 순수 함수."""
+    duration = max(0.0, float(duration or 0.0))
+    raw = [(max(0.0, min(float(s), duration)), max(0.0, min(float(e), duration))) for s, e in spans]
+    order = sorted(range(len(raw)), key=lambda i: (raw[i][0], raw[i][1]))
+    out: list[tuple[float, float]] = [(0.0, 0.0)] * len(raw)
+    for rank, index in enumerate(order):
+        start, end = raw[index]
+        lo, hi = start - LINES_PAD_BEFORE_S, end + LINES_PAD_AFTER_S
+        if rank > 0:
+            prev = raw[order[rank - 1]]
+            lo = max(lo, (prev[1] + start) / 2)
+        if rank + 1 < len(order):
+            nxt = raw[order[rank + 1]]
+            hi = min(hi, (end + nxt[0]) / 2)
+        lo, hi = max(0.0, lo), min(duration, hi)
+        if hi - lo < LINES_MIN_S:  # 줄이 다른 줄 안에 들어간 경우(드묾): 최소 길이만 둔다
+            hi = min(duration, lo + LINES_MIN_S)
+            lo = max(0.0, min(lo, hi - LINES_MIN_S))
+        out[index] = (round(lo, 3), round(hi, 3))
+    return out
+
+
+def _lines_safe(text, limit: int | None = None) -> str:
+    """파일 이름 조각: 금지 글자 · 제어 문자를 빼고 빈칸은 _(한국어 그대로). 비면 ""."""
+    value = _LINES_BAD_CHARS.sub("", str(text or ""))
+    value = re.sub(r"\s+", "_", value.strip())
+    if limit is not None:
+        value = value[:limit]
+    value = re.sub(r"_+", "_", value).strip("._ ")
+    return value
+
+
+def line_file_name(idx: int, speaker, text, width: int = 2) -> str:
+    """NN_<말하는 사람>_<대사 앞 16글자>.mp3 (정리한 이름 — 비는 조각은 뺀다)."""
+    parts = [str(int(idx)).zfill(width), _lines_safe(speaker, MAX_SPEAKER_LEN), _lines_safe(text, LINES_NAME_TEXT)]
+    return "_".join(p for p in parts if p) + ".mp3"
+
+
+def lines_zip_name(variant: str, n: int) -> str:
+    return f"대사별-{LINES_VARIANT_NAMES.get(variant, variant)}-v{int(n)}.zip"
+
+
+def lines_disposition(filename: str, fallback: str) -> str:
+    """Content-Disposition: ASCII 이름(옛 브라우저) + filename*=UTF-8''(한국어 이름, RFC 5987)."""
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]", "", fallback) or "download"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def lines_csv(items: list[dict]) -> bytes:
+    """대사목록.csv(UTF-8 BOM): 번호,말하는 사람,시작(초),끝(초),대사."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["번호", "말하는 사람", "시작(초)", "끝(초)", "대사"])
+    for item in items:
+        writer.writerow([item["idx"], item["speaker"], f"{item['start']:.3f}", f"{item['end']:.3f}", item["textKo"]])
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+# ---------------------------------------------------------------- 외부 호출 래퍼(검사가 바꾼다)
+
+
+def _lines_exists(key: str) -> bool:
+    return bool(edit.STORE.exists(key, bucket=vpoc_settings.VIDEO_BUCKET))
+
+
+def _lines_upload(path: str, key: str, content_type: str) -> None:
+    edit._upload(path, key, bucket=vpoc_settings.VIDEO_BUCKET, content_type=content_type)  # noqa: SLF001
+
+
+def _lines_size(key: str) -> int | None:
+    from . import audio_separate  # noqa: PLC0415 — audio_separate 가 이 모듈 쪽을 import 한다(순환 피함)
+
+    return audio_separate._source_size(key)  # noqa: SLF001
+
+
+def _lines_ffmpeg(args: list[str], what: str) -> None:
+    command = [stitcher.ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error", *args]
+    result = stitcher._edit_run(command)  # noqa: SLF001
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode("utf-8", errors="replace")[:300]
+        raise stitcher.StitchError(f"{what}: {detail}")
+
+
+def _presign_lines(key: str, filename: str, fallback: str, content_type: str) -> str:
+    """영상 버킷 presigned 내려받기(attachment, 한국어 이름). edit._presign_attachment 와 같은 규칙. 검사용 저장소는 presign."""
+    store = edit.STORE
+    if not isinstance(store, vpoc_store.Store):
+        return edit._presign(key, bucket=vpoc_settings.VIDEO_BUCKET, content_type=content_type)  # noqa: SLF001
+    try:
+        target = vpoc_settings.VIDEO_BUCKET or store.main_bucket
+        region = store.video_region if target == store.video_bucket else store.main_region
+        return vpoc_store.s3_client(region).generate_presigned_url(
+            "get_object",
+            Params={"Bucket": target, "Key": key, "ResponseContentType": content_type,
+                    "ResponseContentDisposition": lines_disposition(filename, fallback)},
+            ExpiresIn=edit.URL_EXPIRES_S,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.sound.lines.presign_failed err=%s", type(exc).__name__)
+        return ""
+
+
+# ---------------------------------------------------------------- 원본 · 줄
+
+
+def _no_source(where: str) -> VpocError:
+    return VpocError(where, "LinesNoSource", LINES_NO_SOURCE, 409)
+
+
+def _lines_doc(owner: str, pid: str, gen_id: str, plan: dict, gen: dict, variant: str, where: str) -> tuple[dict, dict]:
+    """(사운드 문서, 지금 원본). 저장된 문서가 지금 원본 · 대본과 맞으면 그것, 아니면 _make_doc 으로 메모리에서만 만든다(쓰지 않는다)."""
+    try:
+        source = _source(owner, pid, gen_id, gen, variant)
+    except VpocError as exc:
+        if exc.kind == "NoSoundSource":
+            raise _no_source(where) from None
+        raise
+    lines_src = _script_lines(plan)
+    sig = _script_sig(lines_src)
+    doc, _ = edit._read_json(doc_key(owner, pid, gen_id, variant))  # noqa: SLF001
+    if _fresh(doc, source, sig):
+        return doc, source
+    try:
+        built = _make_doc(owner, pid, gen_id, plan, gen, variant, source, lines_src, sig, doc)
+    except VpocError as exc:
+        if exc.kind == "SourceUnreadable":
+            raise _no_source(where) from None
+        raise
+    built["versions"] = [v for v in (doc or {}).get("versions") or [] if isinstance(v, dict)]
+    return built, source
+
+
+def _lines_pick(owner: str, pid: str, doc: dict, source: dict, n_raw, where: str) -> tuple[str, int]:
+    """(자를 영상 키, n). n 없음 = 최신 반영본(없으면 원본) · n=0 = 원본 · 그 밖 = 그 반영본(없으면 404)."""
+    prefix = f"users/{owner}/video/{pid}/"
+    versions = [v for v in doc.get("versions") or [] if isinstance(v, dict) and isinstance(v.get("n"), int)
+                and not isinstance(v.get("n"), bool) and str(v.get("key") or "").startswith(prefix)]
+    if n_raw in (None, ""):
+        return (str(versions[-1]["key"]), int(versions[-1]["n"])) if versions else (str(source["key"]), 0)
+    if isinstance(n_raw, bool) or not (isinstance(n_raw, int) or (isinstance(n_raw, str) and _LINES_N_RE.match(n_raw))):
+        raise VpocError(where, "BadVersion", "반영본 번호(n)가 올바르지 않습니다.", 400)
+    n = int(n_raw)
+    if n == 0:
+        return str(source["key"]), 0
+    for version in versions:
+        if version["n"] == n:
+            return str(version["key"]), n
+    raise VpocError(where, "NoSoundVersion", "그 반영본을 찾지 못했습니다. 화면을 다시 불러와 주세요.", 404)
+
+
+def _lines_items(doc: dict) -> list[dict]:
+    """내려받을 줄(빈 대사 빼고) [{idx, lineId, speaker, textKo, start, end}] — idx 는 ⑥ 줄 번호(1부터), 구간은 덧붙인 뒤."""
+    duration = edit._num((doc.get("source") or {}).get("duration")) or 0.0  # noqa: SLF001
+    picked = []
+    for number, line in enumerate(doc.get("lines") or [], 1):
+        if not isinstance(line, dict) or generate._blank_line(line.get("lineKo")) or line.get("silent"):  # noqa: SLF001
+            continue
+        start, end = edit._num(line.get("start")), edit._num(line.get("end"))  # noqa: SLF001
+        if start is None or end is None or end <= start:
+            continue
+        picked.append((number, line, start, end))
+    spans = padded_spans([(s, e) for _, _, s, e in picked], duration)
+    return [{"idx": number, "lineId": str(line.get("id") or ""), "speaker": str(line.get("speaker") or ""),
+             "textKo": str(line.get("lineKo") or ""), "start": span[0], "end": span[1]}
+            for (number, line, _s, _e), span in zip(picked, spans)]
+
+
+def _lines_context(owner: str, pid: str, variant_raw, n_raw, where: str) -> dict:
+    plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
+    variant = _variant_of(variant_raw, gen, where)
+    doc, source = _lines_doc(owner, pid, gen_id, plan, gen, variant, where)
+    key, n = _lines_pick(owner, pid, doc, source, n_raw, where)
+    duration = edit._num((doc.get("source") or {}).get("duration")) or 0.0  # noqa: SLF001
+    return {"genId": gen_id, "variant": variant, "key": key, "n": n, "duration": duration, "items": _lines_items(doc)}
+
+
+def _voice_stem(owner: str, pid: str, key: str, duration: float) -> str:
+    """217: 그 원본(키 그대로)에 분리된 목소리가 쓰기 켬 · 낡지 않음이면 목소리 키, 아니면 ""(separated_audio 가 낡음을 본다)."""
+    from . import audio_separate  # noqa: PLC0415
+
+    try:
+        sep = audio_separate.separated_audio(owner, pid, key, duration or None)
+    except Exception as exc:  # noqa: BLE001 — 못 읽으면 영상 소리
+        log.warning("vnew.sound.lines.sep_failed pid=%s err=%s", pid, type(exc).__name__)
+        return ""
+    return str((sep or {}).get("voiceKey") or "")
+
+
+def lines_view(owner: str, pid: str, args) -> dict:
+    """GET /p/<pid>/sound/lines?variant=&n=. 읽기만 한다. {variant, n, voiceStem, lines:[{idx, lineId, speaker, textKo, start, end}]}."""
+    where = "vnew.sound.lines"
+    args = args if args is not None else {}
+    ctx = _lines_context(owner, pid, args.get("variant"), args.get("n"), where)
+    return {"variant": ctx["variant"], "n": ctx["n"], "voiceStem": bool(_voice_stem(owner, pid, ctx["key"], ctx["duration"])),
+            "lines": ctx["items"]}
+
+
+# ---------------------------------------------------------------- 만들기
+
+
+def _lines_select(items: list[dict], raw, where: str) -> tuple[list[dict], bool]:
+    """(고른 줄, 한 줄인가). lineIds 없음 = 모든 줄(zip). 한 개 = mp3 하나. 모르는 id 는 400."""
+    if raw is None:
+        chosen = list(items)
+        single = False
+    else:
+        if not isinstance(raw, list) or len(raw) > LINES_MAX or not all(isinstance(x, str) for x in raw):
+            raise VpocError(where, "LinesBadLines", f"고를 대사(lineIds)는 {LINES_MAX}개까지의 목록이어야 합니다.", 400)
+        by_id = {item["lineId"]: item for item in items}
+        missing = [x for x in raw if x not in by_id]
+        if missing:
+            raise VpocError(where, "LinesBadLine", "고른 대사를 찾지 못했습니다. 화면을 다시 불러와 주세요.", 400)
+        wanted = set(raw)
+        chosen = [item for item in items if item["lineId"] in wanted]
+        single = len(chosen) == 1
+    if not chosen:
+        raise VpocError(where, "NoLines", LINES_NO_LINES, 400)
+    if len(chosen) > LINES_MAX:
+        raise VpocError(where, "TooManyLines", f"대사는 한 번에 {LINES_MAX}줄까지 내려받을 수 있습니다.", 400)
+    return chosen, single
+
+
+def _lines_names(chosen: list[dict]) -> list[str]:
+    width = max(2, len(str(max(item["idx"] for item in chosen))))
+    names, seen = [], set()
+    for item in chosen:
+        name = line_file_name(item["idx"], item["speaker"], item["textKo"], width)
+        if name in seen:  # 번호가 달라 겹치지 않지만 지킨다
+            name = name[:-4] + f"_{item['lineId']}.mp3"
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _lines_build(audio_key: str, chosen: list[dict], names: list[str], single: bool, workdir: str, where: str) -> str:
+    """원본 소리를 wav 로 한 번 뽑고 줄마다 ffmpeg 한 번으로 mp3. 반환: 올릴 파일 경로(mp3 하나 또는 zip)."""
+    source_path = os.path.join(workdir, "source.bin")
+    try:
+        _download(audio_key, source_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.sound.lines.download_failed err=%s", type(exc).__name__)
+        raise _no_source(where) from None
+    info = _probe(source_path) or {}
+    duration = edit._num(info.get("duration")) or 0.0  # noqa: SLF001
+    if duration <= 0 or not info.get("hasAudio"):
+        raise VpocError(where, "BadAudio", "이 영상에는 소리가 없어 대사를 내려받을 수 없습니다.", 400)
+    if duration > LINES_MAX_SOURCE_S + _TIME_EPS:
+        raise VpocError(where, "SourceTooLong", "원본이 15분보다 길어 대사별로 내려받을 수 없습니다.", 400)
+    wav = os.path.join(workdir, "source.wav")
+    _lines_ffmpeg(["-i", source_path, "-map", "0:a:0", "-vn", "-ar", str(LINES_RATE), "-c:a", "pcm_s16le", "-f", "wav", wav],
+                  "소리를 뽑지 못했습니다")
+    paths = []
+    for number, item in enumerate(chosen):
+        start = min(item["start"], duration)
+        end = min(item["end"], duration)
+        if end - start < LINES_MIN_S:
+            start = max(0.0, end - LINES_MIN_S)
+        path = os.path.join(workdir, f"line-{number:03d}.mp3")
+        _lines_ffmpeg(["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", wav, "-c:a", "libmp3lame", "-b:a", LINES_BITRATE,
+                       "-ar", str(LINES_RATE), "-f", "mp3", path], "대사를 자르지 못했습니다")
+        if not os.path.exists(path) or not os.path.getsize(path):
+            raise stitcher.StitchError("대사를 자르지 못했습니다.")
+        paths.append(path)
+    if single:
+        return paths[0]
+    out = os.path.join(workdir, "lines.zip")
+    with zipfile.ZipFile(out, "w") as archive:
+        for path, name in zip(paths, names):
+            archive.write(path, name, compress_type=zipfile.ZIP_STORED)
+        archive.writestr(LINES_CSV, lines_csv(chosen), compress_type=zipfile.ZIP_DEFLATED)
+        archive.writestr(LINES_README, _LINES_README_TEXT.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+    return out
+
+
+def download_lines(owner: str, pid: str, payload) -> dict:
+    """POST /p/<pid>/sound/lines/download {variant, n?, lineIds?}. 한 줄 = mp3, 그 밖 = zip. 같은 키가 있으면 다시 만들지 않는다.
+    반환 {url, filename, count, kind: mp3|zip, cached, voiceStem}."""
+    where = "vnew.sound.lines.download"
+    payload = payload if isinstance(payload, dict) else {}
+    ctx = _lines_context(owner, pid, payload.get("variant"), payload.get("n"), where)
+    if ctx["duration"] > LINES_MAX_SOURCE_S + _TIME_EPS:
+        raise VpocError(where, "SourceTooLong", "원본이 15분보다 길어 대사별로 내려받을 수 없습니다.", 400)
+    chosen, single = _lines_select(ctx["items"], payload.get("lineIds"), where)
+    names = _lines_names(chosen)
+    voice = _voice_stem(owner, pid, ctx["key"], ctx["duration"])
+    audio_key = voice or ctx["key"]
+    sig_body = [ctx["key"], _lines_size(ctx["key"]), audio_key, _lines_size(audio_key) if voice else None, single,
+                [[i["lineId"], i["start"], i["end"]] for i in chosen], names, LINES_BITRATE, LINES_RATE]
+    sha8 = hashlib.sha256(json.dumps(sig_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:8]
+    ext, content_type = ("mp3", "audio/mpeg") if single else ("zip", "application/zip")
+    key = f"{lines_prefix(owner, pid, ctx['genId'])}/{ctx['variant']}-v{ctx['n']}-{sha8}.{ext}"
+    filename = names[0] if single else lines_zip_name(ctx["variant"], ctx["n"])
+    fallback = (f"line-{chosen[0]['idx']:02d}.mp3" if single
+                else f"lines-{LINES_VARIANT_NAMES.get(ctx['variant'], 'x')}-v{ctx['n']}.zip")
+    cached = True
+    with edit._lock(f"sound-lines:{key}"):  # noqa: SLF001
+        if not _lines_exists(key):
+            cached = False
+            with edit._MEDIA_SEM:  # noqa: SLF001
+                with tempfile.TemporaryDirectory(prefix="vnew-sound-lines-") as workdir:
+                    try:
+                        path = _lines_build(audio_key, chosen, names, single, workdir, where)
+                    except stitcher.StitchError as exc:
+                        log.warning("vnew.sound.lines.build_failed pid=%s err=%s", pid, error_gist(str(exc), 200))
+                        raise VpocError(where, "LinesFailed", "대사 소리를 자르지 못했습니다. 잠시 뒤 다시 시도해 주세요.", 500) from None
+                    _lines_upload(path, key, content_type)
+    log.info("vnew.sound.lines.download pid=%s gen=%s variant=%s n=%d count=%d kind=%s cached=%s voice=%s",
+             pid, ctx["genId"], ctx["variant"], ctx["n"], len(chosen), ext, cached, bool(voice))
+    return {"url": _presign_lines(key, filename, fallback, content_type), "filename": filename, "count": len(chosen),
+            "kind": ext, "cached": cached, "voiceStem": bool(voice)}

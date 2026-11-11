@@ -7604,3 +7604,10 @@ textarea.vnew-field-input {
   }
   /* ==== 작업 215c 끝 ==== */
 }
+
+/* 작업 224: ⑥ 대사별 내려받기 — 이 줄 내려받기(↓) 단추는 듣기 단추와 같은 크기 */
+.vnew-sld-line {
+  font-size: 13px;
+  padding: 4px 8px;
+  margin-left: 4px;
+}
