@@ -619,7 +619,7 @@ def _analyze_script(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=prompts.SCRIPT_SYSTEM,
         blocks=blocks,
         tool=prompts.EMIT_SCRIPT,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.script",
         model=model,
     )
@@ -632,7 +632,7 @@ def _analyze_conti(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=prompts.CONTI_CAST_SYSTEM if cast else prompts.CONTI_SYSTEM,
         blocks=blocks,
         tool=prompts.EMIT_CONTI_CAST if cast else prompts.EMIT_CONTI,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.conti",
         model=model,
     )
@@ -647,7 +647,7 @@ def _analyze_voices(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=prompts.VOICES_SYSTEM,
         blocks=blocks,
         tool=prompts.EMIT_VOICES,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.script.voices",
         model=model,
     )
@@ -656,14 +656,14 @@ def _analyze_voices(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
 def _analyze_fx(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     """llm._converse 로 기호·분위기 JSON 을 받는다(vnew-live-fx A.3). (payload, usage{..model}).
 
-    max_tokens 8000: 채울 컷당 출력 ≈ 140토큰 × 40컷 + 도구 앞 글 ≈ 500. 8000 ≥ 4096 이라 잘림 재시도 없이
-    다음 모델로 간다(llm-top-model-first 규칙).
+    max_tokens = settings.VNEW_LONG_JSON_MAX_TOKENS(작업 225, 기본 32000): 채울 컷당 출력 ≈ 140토큰 × 컷 수 + 도구 앞
+    글 ≈ 500. 잘리면 잘림 재시도 없이 다음 모델로 간다(llm-top-model-first 규칙).
     """
     return vpoc_llm._converse(  # noqa: SLF001
         system_text=prompts.FX_SYSTEM,
         blocks=blocks,
         tool=prompts.EMIT_FX,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.conti.fx",
         model=model,
     )
@@ -1472,7 +1472,7 @@ def _analyze_vibe(blocks: list[dict], *, model: str, system_text: str) -> tuple[
         system_text=system_text,
         blocks=blocks,
         tool=prompts.EMIT_VIBE_CUTS_CAST if _cast_on() else prompts.EMIT_VIBE_CUTS,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.conti.vibe",
         model=model,
     )
@@ -2044,7 +2044,7 @@ def _analyze_cast_fix(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=prompts.CAST_FIX_SYSTEM,
         blocks=blocks,
         tool=prompts.EMIT_CAST_FIX,
-        max_tokens=8000,
+        max_tokens=vnew_settings_module().VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.conti.cast_fix",
         model=model,
     )

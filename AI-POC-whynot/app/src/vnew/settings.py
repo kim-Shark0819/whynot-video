@@ -294,6 +294,11 @@ VNEW_VIBE_CONTI = _bool("VNEW_VIBE_CONTI", True)
 # 켜면 콘티 도구가 presence·actionEn 을 요구하고, 답 뒤에 빠진 인물·화면 밖 손 주인을 검사해 틀리면 고치기 1회(그래도 틀리면 서버가
 # 채운다). 콘티 연기 다시 읽기도 같다. false 면 162 그대로(코드 기본, 템플릿에 넣지 않는다).
 VNEW_CONTI_CAST = _bool("VNEW_CONTI_CAST", True)
+# 작업 225: 컷·줄·샷 수만큼 커지는 긴 JSON 호출(대본·속마음·콘티·기호·샷 계획·인물 고치기·장면 설계)의 출력 예산. prod 21패널·23줄·45초
+# 콘티가 8000 에서 체인 모델 전부 stop=max_tokens 로 잘렸다(llm._trunc_budget(8000) = 4096 < 8000 이라 같은 모델 재시도 없음).
+# 출력 토큰은 쓴 만큼만 계상되므로 상한을 올려도 비용은 같다. 체인 모델(Fable 5.1·Opus 5.5·Opus 4.6·Sonnet 4.6·4.5)은 32000 을 받는다.
+# 틀린 값(숫자 아님·8000 미만·32000 초과)이면 32000 + 경고 1줄. 호출 때 읽는다(검사가 바꿔 끼운다). 코드 기본, 템플릿에 넣지 않는다.
+VNEW_LONG_JSON_MAX_TOKENS = _checked_int("VNEW_LONG_JSON_MAX_TOKENS", 32000, 8000, 32000)
 
 # 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 켜면 캐릭터 상세에서 실사 배우 사진을 글로만 뽑아 고르고(Seedream 4.5
 # text-to-image, 웹툰 그림은 보내지 않는다), 캐릭터 분석에 성별(genderEn)을 더한다. false 면 지금 동작(캐스팅 라우트 404·
