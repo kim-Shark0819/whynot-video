@@ -3974,6 +3974,448 @@ REAL_TAKE_LOCATION_LINE_SHORT = _location_ref("@Image{no}", LOCATION_REF_REAL, s
 FIXED_BACKGROUND_HEAD = "BACKGROUND (no people, same place throughout)"
 VIBE_SETTING_HEAD = "Setting (the same place in every shot)"
 
+# ---------------------------------------------------------------- 작업 223: 배경 = 인물과 같은 빛 · 같은 그림체(video-vibecode 규칙)
+#
+# prod(ff125d82 gen.units[1].webtoon.promptEn): Setting 줄이 "Indoor space beside a bright sunlit window (indoor)." 뿐(시간대 · 빛 방향 ·
+# 팔레트 · 소품 없음)이고 샷 빛이 왼쪽 → 뒤 → 정면으로 서로 달랐다. 참고 구현(whynot-20261029, 읽기만):
+#   vpoc/llm.py:1163-1164 · 1240-1241 backgroundEn(≤ 300자) = 장소 · 시간대 · 빛 · 소품, 사람 없는 배경 판 · 인물 언급 없음,
+#   llm.py:1223-1224 lightEn(≤ 80자) = 빛 방향 · 질만, compose.py:419 · 491 화풍 → "Setting (keep identical in every shot): …"
+#   → 인물 외형 순서, compose.py:400-401 · 444 · 478 · 524-535 화풍 · 배경 · 인물은 줄이지 않고 샷 글만 줄인다, live.py:138-142 reference_lead.
+# 모든 영상 빌더의 배경 줄 = setting_line(이미 있는 장소 데이터로 만든 한 줄, ≤ 300자, 줄이기 밖) + CHAR_HARMONY 1문장. 샷 빛은 그 장소
+# 주 광원 기준 글로 바꾼다(reconcile_light, 결정적 — LLM 호출 없음). 저장된 프롬프트 · 그림은 다시 만들지 않는다(새 프롬프트만).
+BG_HARMONY_223 = True  # 운영은 늘 켬. 223 전 글을 기대값으로 두는 옛 검사만 끈다(tools/check_bg_harmony_223.bg_223_off).
+SETTING_LINE_HEAD = "Setting (keep identical in every shot)"
+SETTING_LINE_TAIL = "; no people in the background plate."
+SETTING_LINE_TAIL_SHORT = "; no people."  # 223 fix1: 바닥 형(가장 좁은 상한)의 꼬리
+SETTING_LINE_MAX = 300  # 줄 전체(머리 · 꼬리 포함) 글자 상한 — 참고 구현 backgroundEn ≤ 300자
+CHAR_HARMONY = {
+    "webtoon": ("Characters are lit by the same light as the setting (same direction, color temperature and shadows) and drawn "
+                "in the same style, line weight and palette as the background."),
+    "real": ("Characters are lit by the same light as the setting (same direction, color temperature and shadows) and filmed "
+             "with the same lens, grain and palette as the background."),
+}
+# 223 fix1: 좁은 상한의 짧은 형(197 짧은 형 BG_HARMONY_SHORT 56 B 이하 — 같은 자리 · 같은 뜻).
+CHAR_HARMONY_SHORT = {"webtoon": "Characters share the setting's light and style.",
+                      "real": "Characters share the setting's light and look."}
+LOCATION_LEAD = "{tag} is the location (no people in it); keep this place, its background and light in every shot"  # live.py:142
+# 223 fix1: 줄인 단계(197 짧은 이름표 자리) · 컷 1개(Kling)의 짧은 형 = 같은 글 앞부분("keep … in every shot" 은 배경 줄 머리가 말한다).
+LOCATION_LEAD_SHORT = "{tag} is the location (no people in it)"
+SHOT_LIGHT_MAX = 80  # llm.py:1223 lightEn ≤ 80자
+# 빛 방향(카메라 기준). 장소 설계의 벽 이름: north = 웹툰 카메라가 가장 자주 보는 벽(인물 뒤), east/south/west 는 시계 방향(locations
+# _DESIGN_SYSTEM) → north 뒤 · east 오른쪽 · south 앞(카메라 쪽) · west 왼쪽. 글 안에서 가장 먼저 나온 방향이 주 방향이다.
+_LIGHT_DIR_RES = (
+    ("behind", re.compile(r"\bback[- ]?(?:lit|light(?:s|ing|ed)?)\b|\bfrom behind\b|\bbehind (?:the )?(?:[\w-]+ )?(?:characters?|"
+                          r"people|person|figures?|subjects?|couple|pair|two|him|her|them)\b|\bcontre[- ]?jour\b"
+                          r"|\bcounter[- ]?light\w*|\bsilhouett\w*"
+                          r"|\brim[- ]?(?:lit|light(?:s|ing)?)\b|\bnorth(?:[- ](?:wall|side|facing))?\b", re.IGNORECASE)),
+    ("left", re.compile(r"\bleft\b|\bwest(?:[- ](?:wall|side|facing))?\b", re.IGNORECASE)),
+    ("right", re.compile(r"\bright\b|\beast(?:[- ](?:wall|side|facing))?\b", re.IGNORECASE)),
+    ("front", re.compile(r"\bfrontal\b|\bfrom the front\b|\bfrom in front\b|\bfront[- ]?(?:lit|light\w*)\b|\bhead[- ]on\b"
+                         r"|\bfrom the camera\b|\bsouth(?:[- ](?:wall|side|facing))?\b", re.IGNORECASE)),
+    ("above", re.compile(r"\boverhead\b|\bfrom above\b|\btop[- ]?light\w*|\bdown[- ]?light\w*|\bceiling (?:lights?|lamps?)\b",
+                         re.IGNORECASE)),
+)
+_LIGHT_DIR_TEXT = {"left": "from the left", "right": "from the right", "behind": "from behind the characters",
+                   "front": "from the front", "above": "from above"}
+_LIGHT_DIR_TEXT_SHORT = {**_LIGHT_DIR_TEXT, "behind": "from behind"}  # 223 fix1: 배경 줄 빛 짧은 형
+_LIGHT_DIR_REL = {"left": "on the left", "right": "on the right", "behind": "behind the characters",
+                  "front": "in front of the characters", "above": "above"}
+_LIGHT_SOURCE_WORDS = (r"windows?|glass fronts?|storefronts?|shopfronts?|shop windows?|sunlight|sun|skylights?|ceiling lights?|"
+                       r"fluorescent (?:lights?|tubes?)|lamps?|neon(?: signs?)?|monitors?|screens?|phones?|candles?|street ?lights?|"
+                       r"moonlight|moon|doorway|fireplace|fire|lanterns?")
+_LIGHT_SOURCE_RE = re.compile(rf"\b({_LIGHT_SOURCE_WORDS})\b", re.IGNORECASE)
+# "from the <꾸밈 0-3 낱말> <광원>" — 광원 이름은 꾸밈째(convenience store glass front). 꾸밈 중 빛 · 크기 낱말은 뺀다.
+_LIGHT_FROM_RE = re.compile(rf"\bfrom (?:the |a |an )?((?:[\w-]+ ){{0,3}}?(?:{_LIGHT_SOURCE_WORDS}))\b", re.IGNORECASE)
+_SOURCE_DROP = frozenset({"brightly", "bright", "lit", "softly", "soft", "large", "big", "small", "tall", "wide", "open", "main",
+                          "the", "a", "an", "dim", "warm", "cool", "white"})
+_PRACTICAL_SOURCES = ("lamp", "neon", "monitor", "screen", "phone", "candle", "lantern", "fire", "fireplace", "street light")
+_LIGHT_QUALITY_RE = re.compile(r"\b(soft|bright|dim|harsh|diffused?|gentle|strong|hard|pale|low|muted)\b", re.IGNORECASE)
+_RIM_RE = re.compile(r"\brim\b|\bhalo\b|\bhair light\b", re.IGNORECASE)
+_WARM_RE = re.compile(r"\b(warm\w*|golden|sunset|dusk|tungsten|incandescent|amber|orange|candle\w*|fire\w*|lamp\w*|evening)\b",
+                      re.IGNORECASE)
+_COOL_RE = re.compile(r"\b(cool\w*|cold|blue|bluish|moon\w*|night\w*|fluorescent|overcast|neon|dawn)\b", re.IGNORECASE)
+_DAY_RE = re.compile(r"\b(day\w*|sun\w*|noon|midday|morning|afternoon|windows?)\b", re.IGNORECASE)
+_TIME_WORDS_EN = (("sunset", "sunset"), ("dusk", "dusk"), ("evening", "evening"), ("midnight", "night"), ("night", "night"),
+                  ("moon", "night"), ("dawn", "dawn"), ("morning", "morning"), ("afternoon", "afternoon"), ("noon", "midday"),
+                  ("daylight", "daytime"), ("sunlit", "daytime"), ("sunlight", "daytime"), ("sunny", "daytime"),
+                  ("daytime", "daytime"), ("day", "daytime"))
+_PALETTE_RE = re.compile(r"[^.;,]*\b(?:palette|pastel|colou?rs?|tones?|hues?|saturat\w*|monochrome)\b[^.;,]*", re.IGNORECASE)
+_SETTING_LIGHT_WORDS = re.compile(r"\b(?:light\w*|lit|sun\w*|shadows?|glow\w*|daylight|morning|afternoon|evening|night|dusk|"
+                                  r"dawn|noon|day)\b", re.IGNORECASE)
+SETTING_FILLER = ("the props drawn in the panels", "the webtoon's own colors", "the panels' time of day")  # 223 fix1: 나가지 않는 채움 글
+
+
+def light_direction(text) -> str:
+    """작업 223: 빛 글의 주 방향(left · right · behind · front · above, 카메라 기준). 없으면 ""."""
+    text = str(text or "")
+    best, at = "", len(text) + 1
+    for name, pattern in _LIGHT_DIR_RES:
+        match = pattern.search(text)
+        if match and match.start() < at:
+            best, at = name, match.start()
+    return best
+
+
+def _light_source(text) -> str:
+    """작업 223: 빛 글의 광원 이름(단수). "from the … <광원>" 이 있으면 그 꾸밈째(빛 · 크기 낱말 뺌), 없으면 처음 나온 광원 낱말. 없으면 ""."""
+    text = str(text or "")
+    found = _LIGHT_FROM_RE.search(text)
+    words = (found.group(1) if found else (_LIGHT_SOURCE_RE.search(text) or [None, ""])[1]).lower().split()
+    words = [w for w in words if w not in _SOURCE_DROP and not re.match(r"^(?:north|east|south|west)(?:-\w+)?$|^walls?$", w)] or words
+    word = " ".join(words)
+    if not word:
+        return ""
+    word = {"sun": "sunlight", "moon": "moonlight", "streetlight": "street light", "street lights": "street light",
+            "streetlights": "street light"}.get(word, word)
+    if word.startswith("neon"):
+        return "neon sign"
+    if word.endswith("s") and not word.endswith(("sunlight", "moonlight", "glass")):
+        word = word[:-1]
+    return word
+
+
+def _light_quality(text) -> str:
+    match = _LIGHT_QUALITY_RE.search(str(text or ""))
+    return match.group(1).lower() if match else ""
+
+
+def _light_temperature(text, time_en: str = "") -> str:
+    """작업 223: 색온도 낱말(warm · cool · neutral daylight). 빛 글의 색 형용사 → 광원 · 때 낱말 → 시간대 순. 모르면 ""."""
+    text = str(text or "")
+    explicit = re.search(r"\b(warm|cool|cold)(?:er|ish)?\b", text, re.IGNORECASE)
+    if explicit:
+        return "warm" if explicit.group(1).lower() == "warm" else "cool"
+    if _WARM_RE.search(text):
+        return "warm"
+    if _COOL_RE.search(text):
+        return "cool"
+    if time_en in ("sunset", "dusk", "evening"):
+        return "warm"
+    if time_en in ("night", "dawn"):
+        return "cool"
+    if _DAY_RE.search(text) or time_en in ("day", "daytime", "morning", "afternoon", "midday"):
+        return "neutral daylight"
+    return ""
+
+
+def _source_light(source: str) -> str:
+    """"window" → "window light", "sunlight" · "ceiling light" 은 그대로."""
+    return source if source.endswith("light") or not source else source + " light"
+
+
+def _setting_texts(plan: dict, loc: dict | None) -> tuple[str, str]:
+    """작업 223: (장소 빛 글, 콘티 배경 글). 빛 = 사실 → 설계 lightEn, 콘티 배경 = conti.background.promptEn(vibe 콘티, 사람 없는 배경)."""
+    design = (loc or {}).get("design") if isinstance((loc or {}).get("design"), dict) else {}
+    facts = (loc or {}).get("facts") if isinstance((loc or {}).get("facts"), dict) else {}
+    light = str(facts.get("lightEn") or design.get("lightEn") or "").strip()
+    background = (plan.get("conti") or {}).get("background")
+    conti_bg = str((background or {}).get("promptEn") or "").strip() if isinstance(background, dict) else str(background or "")
+    return light, " ".join(conti_bg.split())
+
+
+def _location_cuts(plan: dict, location_en: str) -> list[dict]:
+    """작업 223: 그 장소의 콘티 컷(장소 이름 정규화가 같은 컷). 장소를 모르면 장소가 없는 컷 · 대본 첫 장소 컷."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    cuts = [c for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)]
+    opening = str(((plan.get("script") or {}).get("setting") or {}).get("locationEn") or "").strip()
+    key = loc_mod.normalize_name(str(location_en or "").strip() or opening)
+    return [c for c in cuts if loc_mod.normalize_name(str(c.get("locationEn") or "").strip() or opening) == key]
+
+
+def main_light(plan: dict, location_en: str = "") -> dict:
+    """작업 223: 그 장소의 주 광원 {source, dir, quality, temp, time} — 같은 plan · 같은 장소면 늘 같다(테이크 · 컷마다 같은 줄).
+
+    광원 · 방향 · 질: 장소 사실/설계 lightEn → 콘티 배경 글 → 장소 이름 → 그 장소 콘티 컷 lightEn(방향은 가장 많은 것, 같으면 먼저 나온 것).
+    시간대: 대본 setting.timeKo → 빛 · 배경 글 낱말. 색온도: 빛 글 → 시간대."""
+    setting = (plan.get("script") or {}).get("setting") or {}
+    location = str(location_en or "").strip() or str(setting.get("locationEn") or "").strip()
+    loc = _location_by_name(plan, location) if location else None
+    light_text, conti_bg = _setting_texts(plan, loc)
+    name = str((loc or {}).get("nameEn") or "").strip() or location
+    shot_lights = [str(c.get("lightEn") or "") for c in _location_cuts(plan, location) if str(c.get("lightEn") or "").strip()]
+    texts = [t for t in (light_text, conti_bg, name) if t]
+    source = next((s for s in (_light_source(t) for t in texts + shot_lights) if s), "")
+    direction = next((d for d in (light_direction(t) for t in (light_text, conti_bg)) if d), "")
+    if not direction:
+        dirs = [d for d in (light_direction(t) for t in shot_lights) if d]
+        if dirs:
+            # 가장 많은 방향. 같으면 역광이 아닌 것 → 먼저 나온 것(223 fix1: 역광은 장소 데이터나 샷 다수가 말할 때만 주 광원).
+            order = list(dict.fromkeys(dirs))
+            direction = max(order, key=lambda d: (dirs.count(d), d != "behind", -order.index(d)))
+    quality = next((q for q in (_light_quality(t) for t in texts + shot_lights) if q), "")
+    time_en = _time_of_day_en(setting.get("timeKo") or "")
+    if not time_en:
+        blob = " ".join(texts + shot_lights).lower()
+        time_en = next((en for word, en in _TIME_WORDS_EN if re.search(r"\b" + word, blob)), "")
+    temp = next((t for t in (_light_temperature(x, time_en) for x in (light_text, conti_bg, name)) if t), "")
+    temp = temp or _light_temperature(" ".join(shot_lights), time_en)
+    return {"source": source, "dir": direction, "quality": quality, "temp": temp, "time": time_en}
+
+
+def _setting_props(loc: dict | None, conti_bg: str) -> list[str]:
+    """작업 223: 소품 2-4개. 설계 propsEn → 사실 벽 물건(색 + 종류) → 설계 벽 featuresEn → 콘티 배경 글의 빛 · 시간 아닌 절."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    design = (loc or {}).get("design") if isinstance((loc or {}).get("design"), dict) else {}
+    facts = (loc or {}).get("facts") if isinstance((loc or {}).get("facts"), dict) else {}
+    found: list[str] = []
+
+    def add(text) -> None:
+        # 소품 이름 머리(" with " · " (" · "," 앞, 4 낱말까지): "Black U-shaped steel bollard with yellow band (seat)" → "Black U-shaped steel bollard"
+        text = re.split(r"\s+(?:with|on|in|under|beside|next to|against|and)\s+|\s*[(,;:]", " ".join(str(text or "").split()))[0]
+        text = " ".join(text.split()[-4:]).strip(" .,;")
+        if text and len(text) <= 40 and text.lower() not in (f.lower() for f in found) and not _PERSON_WORDS.search(text):
+            found.append(text)
+
+    for prop in design.get("propsEn") or []:
+        add(prop.get("labelEn") if isinstance(prop, dict) else prop)
+    for side in loc_mod.SIDES:
+        for obj in ((facts.get("walls") or {}).get(side) or {}).get("objects") or []:
+            if isinstance(obj, dict) and obj.get("kind"):
+                color = " ".join(str(obj.get("colorEn") or "").split())
+                short = color if len(color.split()) <= 2 and not re.search(r"\b(?:with|and)\b|[,;]", color) else ""
+                add(" ".join(p for p in (short, str(obj.get("kind")).strip()) if p))
+    for side in loc_mod.SIDES:
+        wall = (design.get("walls") or {}).get(side) if isinstance(design.get("walls"), dict) else None
+        for piece in re.split(r"[,;]", str((wall or {}).get("featuresEn") or "")):
+            add(piece)
+    if len(found) < 2 and conti_bg:
+        for piece in re.split(r",|;|\.\s|\band\b", conti_bg):
+            piece = re.sub(r"^\s*(?:with|and|a|an|the)\s+", "", piece.strip(), flags=re.IGNORECASE)
+            if piece and not _SETTING_LIGHT_WORDS.search(piece) and len(piece.split()) <= 6:
+                add(piece)
+    return found[:4]
+
+
+def _setting_palette(loc: dict | None, real: bool) -> list[str]:
+    """작업 223: 팔레트 = [벽 색, 바닥](사실 → 설계). 데이터가 없으면 [](223 fix1: 채움 글 없음)."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    design = (loc or {}).get("design") if isinstance((loc or {}).get("design"), dict) else {}
+    facts = (loc or {}).get("facts") if isinstance((loc or {}).get("facts"), dict) else {}
+    colors: list[str] = []
+    for side in loc_mod.SIDES:
+        color = str(((facts.get("walls") or {}).get(side) or {}).get("wallColorEn") or "").strip()
+        color = " ".join(re.split(r"[;,(]", color)[0].split()[:4])  # 색 머리만("white and blue; a full-width glass …" → "white and blue")
+        if color and color.lower() not in (c.lower() for c in colors):
+            colors.append(color)
+    enclosed = _flag(design.get("enclosed")) if "enclosed" in design else True
+    pieces = [f"{' / '.join(colors[:2])} {'walls' if enclosed else 'surroundings'}"] if colors else []
+    floor = re.split(r"[;,(]|\s+(?:laid|with|in a|in an)\s+", str(facts.get("floorEn") or design.get("floorEn") or "").strip())[0]
+    floor = _clip_plain(floor.strip().rstrip("."), 40)
+    if floor:
+        pieces.append(floor + ("" if re.search(r"\b(?:floor|ground|paving|pavement|road|grass|sand)\b", floor, re.IGNORECASE)
+                               else " floor"))
+    return pieces
+
+
+def _clip_plain(text: str, limit: int) -> str:
+    """작업 223: 단어 경계로 limit 자 안(마침표를 붙이지 않는다), 끝의 전치사 · 관사 · 접속사는 뗀다(_DANGLING_TAIL)."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit]
+    clipped = clipped[: clipped.rfind(" ")] if " " in clipped else clipped
+    return _DANGLING_TAIL.sub("", clipped.rstrip(" ,;:.")).rstrip(" ,;:./")
+
+
+def setting_parts(plan: dict, location_en: str = "", *, real: bool = False) -> dict:
+    """작업 223: 배경 줄 조각 {place, time, light, props, palette} 과 주 광원(main). 모두 이미 있는 데이터(장소 설계 · 사실, 콘티 배경,
+    대본 setting, 콘티 샷 빛)에서 — LLM 호출 없음. 실사는 그림 낱말을 뺀다."""
+    setting = (plan.get("script") or {}).get("setting") or {}
+    location = str(location_en or "").strip() or str(setting.get("locationEn") or "").strip() or "the scene"
+    loc = _location_by_name(plan, location)
+    design = (loc or {}).get("design") if isinstance((loc or {}).get("design"), dict) else {}
+    _light_text, conti_bg = _setting_texts(plan, loc)
+    main = main_light(plan, location)
+    enclosed = _flag(design.get("enclosed")) if "enclosed" in design else _flag(setting.get("enclosed"))
+    name = str((loc or {}).get("nameEn") or "").strip() or location
+    # 이름에 이미 실내/실외 낱말이 있으면 꼬리표를 붙이지 않는다("Outdoors by …" (outdoor) 처럼 같은 말 두 번 없이 300자 안).
+    place = name if re.search(r"\b(?:indoors?|outdoors?)\b", name, re.IGNORECASE) else f"{name} ({'indoor' if enclosed else 'outdoor'})"
+    props = _setting_props(loc, conti_bg)
+    palette = _setting_palette(loc, real)
+    if real:
+        place = vnew_fx.strip_drawing_words(place) or place
+        props = [vnew_fx.strip_drawing_words(p) or p for p in props]
+        palette = [vnew_fx.strip_drawing_words(p) or p for p in palette]
+    # 223 fix1: 데이터가 없는 조각은 채움 글 없이 뺀다(소품 · 팔레트 · 시간대 · 빛 — "the props drawn in the panels" 같은 글은 뜻이 없다).
+    return {"place": place, "time": main["time"], "light": _setting_light(main), "props": props, "palette": palette,
+            "main": main}
+
+
+def _setting_light(main: dict, short: bool = False) -> str:
+    """작업 223: 배경 줄의 주 광원 조각 "main light: <질> <광원> light <방향>, <색온도> color temperature".
+    short(223 fix1) = 질 · 색온도 없이 광원 끝 두 낱말 + 짧은 방향("from behind"). 광원도 방향도 모르면 ""(채움 글 없음)."""
+    source = str(main.get("source") or "")
+    direction = (_LIGHT_DIR_TEXT_SHORT if short else _LIGHT_DIR_TEXT).get(str(main.get("dir") or ""), "")
+    if not source and not direction:
+        return ""
+    if short:
+        source = " ".join(source.split()[-2:])
+    words = [None if short else main.get("quality"), _source_light(source) if source else "", direction]
+    light = "main light: " + " ".join(p for p in words if p)
+    return light + (f", {main['temp']} color temperature" if main.get("temp") and not short else "")
+
+
+# 223 fix1: 장소 이름의 머리(첫 절 — "Outdoors by a low metal railing with apartment buildings …" → "Outdoors by a low metal railing").
+_PLACE_CLAUSE_RE = re.compile(r",|;|\s+(?:with|beside|next to|near|overlooking|in front of|behind|under|where|and)\s+", re.IGNORECASE)
+
+
+def _place_core(place: str) -> str:
+    """작업 223 fix1: 장소의 바닥 형 = 이름 첫 절(10자 이상일 때) + 실내/실외 꼬리표(있으면). 첫 절이 없으면 그대로."""
+    place = " ".join(str(place or "").split())
+    tag = ""
+    match = re.search(r"\s+\((?:indoor|outdoor)\)$", place)
+    if match:
+        place, tag = place[:match.start()], match.group(0)
+    head = _PLACE_CLAUSE_RE.split(place, maxsplit=1)[0].strip(" ,;")
+    return (head if len(head) >= 10 else place) + tag
+
+
+def _setting_text(parts: dict, props: list[str], palette: list[str], light: str, place: str,
+                  tail: str = SETTING_LINE_TAIL) -> str:
+    body = [place, parts["time"], light, ", ".join(props), ("palette: " + ", ".join(palette)) if palette else ""]
+    return SETTING_LINE_HEAD + ": " + ", ".join(" ".join(p.split()) for p in body if p) + tail
+
+
+def setting_forms(plan: dict, location_en: str = "", *, real: bool = False, time: bool = True) -> list[str]:
+    """작업 223 fix1: 배경 줄 형(긴 것부터, 모두 ≤ SETTING_LINE_MAX 자, 서로 다른 길이). 마지막 = 바닥(장소 + 시간대 + 주 광원 — 그 밑으로
+    줄이지 않는다). 긴 형 → 소품 2개 · 벽 색만 → 팔레트 뺌 → 소품 뺌 → 빛 짧은 형 → 장소 첫 절 → 꼬리 짧은 형("; no people.").
+    time=False = 시간대를 같은 프롬프트의 다른 줄(Kling 시간대 문장)이 말할 때만 뺀다."""
+    parts = setting_parts(plan, location_en, real=real)
+    if not time:
+        parts = {**parts, "time": ""}
+    props, palette, place, light = list(parts["props"]), list(parts["palette"]), parts["place"], parts["light"]
+
+    def fit(props: list[str], palette: list[str], light: str, place: str, tail: str = SETTING_LINE_TAIL) -> str:
+        props, palette = list(props), list(palette)
+
+        def text() -> str:
+            return _setting_text(parts, props, palette, light, place, tail)
+
+        while len(text()) > SETTING_LINE_MAX and len(props) > 2:
+            props.pop()
+        if len(text()) > SETTING_LINE_MAX and len(palette) > 1:
+            palette.pop()
+        over = len(text()) - SETTING_LINE_MAX
+        if over > 0:
+            place = _clip_plain(place, max(40, len(place) - over))
+        over = len(text()) - SETTING_LINE_MAX
+        if over > 0 and props:
+            props = [_clip_plain(p, max(12, len(p) - (over + 1) // len(props))) for p in props]
+        out = text()
+        return out if len(out) <= SETTING_LINE_MAX else out[:SETTING_LINE_MAX - len(tail)].rstrip(" ,;") + tail
+
+    short_light, core = _setting_light(parts["main"], short=True), _place_core(place)
+    bare_light = short_light[len("main light: "):] if short_light.startswith("main light: ") else short_light
+    forms = [fit(props, palette, light, place), fit(props[:2], palette[:1], light, place), fit(props[:2], [], light, place),
+             fit([], [], light, place), fit([], [], short_light, place), fit([], [], short_light, core),
+             fit([], [], short_light, core, SETTING_LINE_TAIL_SHORT), fit([], [], bare_light, core, SETTING_LINE_TAIL_SHORT)]
+    out: list[str] = []
+    for form in forms:
+        if not out or len(form) < len(out[-1]):
+            out.append(form)
+    return out
+
+
+def setting_line(plan: dict, location_en: str = "", *, real: bool = False) -> str:
+    """작업 223: 테이크 · 영상 1개의 배경 줄(가장 긴 형, ≤ SETTING_LINE_MAX 자).
+    "Setting (keep identical in every shot): <장소>, <시간대>, <주 광원 + 방향 + 색온도>, <소품 2-4개>, <팔레트>; no people in the
+    background plate." 223 fix1: 데이터가 없는 조각은 뺀다."""
+    return setting_forms(plan, location_en, real=real)[0]
+
+
+def setting_block(plan: dict, location_en: str = "", *, real: bool = False, room: int | None = None,
+                  harmony: bool = True, time: bool = True) -> str:
+    """작업 223: 배경 줄 + 조화 문장(한 덩어리). 223 끔이면 "".
+    223 fix1: room(UTF-8 바이트, None = 제한 없음)에 드는 가장 긴 형 — 배경 줄 형(setting_forms) × 조화 문장(긴 형 → 짧은 형).
+    바닥(장소 + 시간대 + 주 광원 + 짧은 조화 문장)보다 줄이지 않는다(그때는 room 을 넘는다 — 부르는 쪽 줄이기가 나머지를 맡는다).
+    harmony=False 면 배경 줄만(조화 문장은 그 빌더의 다른 줄이 맡는다)."""
+    if not BG_HARMONY_223:
+        return ""
+    variant = "real" if real else "webtoon"
+    forms = setting_forms(plan, location_en, real=real, time=time)
+    if not harmony:
+        candidates = list(forms)
+    else:
+        # 조화 문장이 소품 · 팔레트보다 먼저: 긴 조화 문장 × 배경 줄 형 → 짧은 조화 문장 × 형 → (197 처럼) 조화 문장 없이 × 형.
+        candidates = ([form + " " + CHAR_HARMONY[variant] for form in forms]
+                      + [form + " " + CHAR_HARMONY_SHORT[variant] for form in forms] + list(forms))
+    if room is None:
+        return candidates[0]
+    return next((c for c in candidates if _utf8_len(c) <= room), candidates[-1])
+
+
+def setting_room(old_text: str, skeleton: str, delta: tuple[int, int] = (0, 0)) -> int:
+    """작업 223 fix1: 배경 덩어리(SETTING_SLOT 자리)에 줄 수 있는 UTF-8 바이트 = 같은 줄이기 단계 223 전 글(옛 배경 줄 · 197 조화 문장 ·
+    옛 장소 이름표 · 옛 샷 빛)이 쓰던 만큼. skeleton = 223 글에서 배경 덩어리만 SETTING_SLOT 인 글, delta = (바이트, 글자) 옛 글에 없던
+    223 샷 글(샷 빛)만큼 old_text 에서 뺄 값. 새 글 ≤ 옛 글(바이트 · 글자 둘 다) — 줄이기 단계 · 조각 수 · 상한이 223 전과 같고, 배경 줄 길이가
+    대사 · 소리 규칙 같은 다른 글에 따라 바뀌지 않는다. 배경 글은 ASCII 라 바이트로 재면 두 단위 모두 지킨다."""
+    rest_b = _utf8_len(skeleton) - _utf8_len(SETTING_SLOT)
+    rest_c = len(skeleton) - len(SETTING_SLOT)
+    return min(_utf8_len(old_text) - int(delta[0]) - rest_b, len(old_text) - int(delta[1]) - rest_c)
+
+
+SETTING_SLOT = "\u0000SETTING223\u0000"  # 223 fix1: 배경 덩어리 자리표(빌더가 잴 때만 — 프롬프트에 나가지 않는다)
+
+
+def char_harmony_form(real: bool, form: str) -> str:
+    """작업 223 fix1: 197 조화 문장 자리(HARMONY 줄 끝 · 고정부 다음 줄)의 223 조화 문장 — "full" · "short" · "none"(197 과 같은 단계).
+    길이는 197 같은 형 이하(긴 형 ≤ BG_HARMONY, 짧은 형 ≤ BG_HARMONY_SHORT)라 줄이기 단계가 223 전과 같다."""
+    variant = "real" if real else "webtoon"
+    return "" if form == "none" else (CHAR_HARMONY_SHORT if form == "short" else CHAR_HARMONY)[variant]
+
+
+def reconcile_light(text, main: dict) -> str:
+    """작업 223: 샷 빛 글 → 장소 주 광원 기준 글(≤ SHOT_LIGHT_MAX 자, 결정적). 주 방향이 없으면 글 그대로.
+
+    방향이 같거나 없으면 "<질> key light from the <광원> <방향>". 다르면(역광 ↔ 정면 · 옆) 주 방향으로 바꾸고, 역광 · 림이던 샷은
+    ", rim light on the hair"(같은 광원). 다른 실내 광원(lamp · screen · candle …)은 "plus a soft glow from the …" 로 밝혀 둔다.
+    그 밖의 다른 광원 · 색 낱말은 뺀다(두 광원이 설명 없이 남지 않게)."""
+    text = " ".join(str(text or "").split()).rstrip(" .")
+    direction = str((main or {}).get("dir") or "")
+    if not direction:
+        return text
+    if not text:
+        return ""
+    source = str(main.get("source") or "")
+    shot_dir = light_direction(text)
+    # 223 fix1: 주 광원과 맞는 샷 빛(같은 방향 · 방향 없음, 다른 광원 이름 없음)은 저장된 글 그대로 — 바꿀 까닭이 없고 글도 늘지 않는다.
+    named = _light_source(text)
+    if shot_dir in ("", direction) and not _RIM_RE.search(text) and (not named or named == source or not source):
+        return _clip_words(text, SHOT_LIGHT_MAX).rstrip(" ,;")
+    quality = _light_quality(text) or str(main.get("quality") or "")
+    noun = "backlight" if direction == "behind" else "key light"
+    rim = direction == "behind" or shot_dir == "behind" or bool(_RIM_RE.search(text))
+    extra = _light_source(text)
+    practical = extra and extra != source and (extra in _PRACTICAL_SOURCES or extra.split()[-1] in _PRACTICAL_SOURCES)
+    glow = f", plus a soft glow from the {extra}" if practical else ""
+    out = ""
+    # 광원 이름이 길면(convenience store glass front) 끝 두 낱말 → 질 낱말 뺌 순으로 80자 안에(방향 · 림은 남긴다)
+    for name, qual in ((source, quality), (" ".join(source.split()[-2:]), quality), (" ".join(source.split()[-2:]), "")):
+        where = f"from the {name} {_LIGHT_DIR_REL[direction]}" if name else _LIGHT_DIR_TEXT[direction]
+        out = " ".join(p for p in (qual, noun, where) if p) + (", rim light on the hair" if rim else "")  # 림 = 같은 광원
+        if len(out + glow) <= SHOT_LIGHT_MAX:
+            break
+    out += glow if len(out + glow) <= SHOT_LIGHT_MAX else ""
+    return _clip_words(out, SHOT_LIGHT_MAX).rstrip(" ,;")
+
+
+def location_lead(tag: str, short: bool = False) -> str:
+    """작업 223: 영상 프롬프트의 장소 그림 이름표(참고 구현 live.reference_lead place=True 글). 끝 마침표 없음.
+    223 fix1: short = 앞부분만(LOCATION_LEAD_SHORT — 197 짧은 이름표보다 짧다)."""
+    return (LOCATION_LEAD_SHORT if short else LOCATION_LEAD).format(tag=tag)
+
+
+def shot_light(plan: dict, cut: dict | None, main: dict | None = None) -> str:
+    """작업 223 fix1: 그 샷에 나가는 빛 글 — 223 = 그 샷 장소 주 광원 기준(reconcile_light), 끔 · 빈 글 = 저장된 lightEn 그대로.
+    역광 눈 보호(222 _backlit)도 이 글로 판정한다(나가는 빛과 같은 글)."""
+    stored = " ".join(str((cut or {}).get("lightEn") or "").split())
+    if not BG_HARMONY_223 or not stored:
+        return stored
+    return reconcile_light(stored, main if main is not None else main_light(plan, str((cut or {}).get("locationEn") or "")))
+
 # vnew-live-fx RA4.2·RA5.2 묘사 규칙(참고 구현 vpoc/compose.py:491·500-502, vpoc/llm.py:1255-1258). 인물 모습 유지
 # (rule_replace "keep face and hair identical …")는 이미 있어 그대로 둔다. VNEW_FX 켬일 때만 붙인다.
 # 작업 197: 끝 문장 옛 글 "The location, its props and background stay identical in every cut." → 같은 장소 · 같은 소품.
@@ -4106,30 +4548,167 @@ _OLD_AUDIO_FULL_RE = re.compile(r"[ \t]*Generate synchronized audio: characters 
 _OLD_AUDIO_COMPACT_RE = re.compile(r"[ \t]*Korean dialogue and ambient sound, no music\.")
 
 
-def audio_rule(has_lines: bool = True, *, compact: bool = False, inner: bool = True) -> str:
+def audio_rule(has_lines: bool = True, *, compact: bool = False, inner: bool = True, anime: bool = False) -> str:
     """작업 211: 영상 소리 규칙 한 문장. 대사 줄이 있으면 대사만, 없으면 침묵만. compact = 바이트 상한 프롬프트용 짧은 형.
-    211 fix2: inner=False(속마음 줄 없음)면 원형도 "inner" 낱말이 없는 형."""
+    211 fix2: inner=False(속마음 줄 없음)면 원형도 "inner" 낱말이 없는 형.
+    작업 222: anime=True(애니 · 웹툰 영상)면 뒤에 자막 금지 고정 문장(ANIME_NO_SUBTITLES). 소리 규칙 자리는 어느 빌더에서도
+    줄이기 · 자르기가 건드리지 않아 이 문장도 남는다. 실사(anime=False)는 글자 그대로."""
     if has_lines:
         if compact:
-            return AUDIO_DIALOGUE_ONLY_COMPACT
-        return AUDIO_DIALOGUE_ONLY if inner else AUDIO_DIALOGUE_ONLY_SPOKEN
-    return AUDIO_SILENCE_ONLY_COMPACT if compact else AUDIO_SILENCE_ONLY
+            rule = AUDIO_DIALOGUE_ONLY_COMPACT
+        else:
+            rule = AUDIO_DIALOGUE_ONLY if inner else AUDIO_DIALOGUE_ONLY_SPOKEN
+    else:
+        rule = AUDIO_SILENCE_ONLY_COMPACT if compact else AUDIO_SILENCE_ONLY
+    if anime and ANIME_NO_SUBTITLES:
+        return " ".join(p for p in (rule, ANIME_NO_SUBTITLES) if p)
+    return rule
 
 
-def _take_audio_rule(has_lines: bool, *, compact: bool = False, inner: bool = True) -> str:
-    """211 fix1: 옛 통 테이크 RULES 의 옛 소리 문장 자리(원형 · 짧은 형 둘 다 옛 글 바이트 이하). 검사가 옛 글로 되돌리는 자리."""
-    return audio_rule(has_lines, compact=compact, inner=inner)
+def _take_audio_rule(has_lines: bool, *, compact: bool = False, inner: bool = True, anime: bool = False) -> str:
+    """211 fix1: 옛 통 테이크 RULES 의 옛 소리 문장 자리(원형 · 짧은 형 둘 다 옛 글 바이트 이하). 검사가 옛 글로 되돌리는 자리.
+    작업 222: anime 이면 자막 금지 문장이 붙는다(audio_rule)."""
+    return audio_rule(has_lines, compact=compact, inner=inner, anime=anime)
 
 
-def _with_audio(text: str, has_lines: bool) -> str:
+def _with_audio(text: str, has_lines: bool, *, anime: bool = False) -> str:
     """211 fix1: 옛 소리 문장이 없던 자리 — 글 뒤에 가장 짧은 규칙(짧은 형). 규칙이 빈 글이면(검사의 211 끔) 글 그대로."""
-    rule = audio_rule(has_lines, compact=True)
+    rule = audio_rule(has_lines, compact=True, anime=anime)
     return text + (" " + rule if rule else "")
 
 
-def _vibe_audio_line(has_lines: bool) -> str:
-    """작업 211: vibe 통 테이크(159) 맨 끝 소리 규칙 줄. 211 fix1: 옛 문장이 없던 자리라 가장 짧은 형. 빈 글이면 줄이 없다."""
-    return audio_rule(has_lines, compact=True)
+def _vibe_audio_line(has_lines: bool, *, anime: bool = False) -> str:
+    """작업 211: vibe 통 테이크(159) 맨 끝 소리 규칙 줄. 211 fix1: 옛 문장이 없던 자리라 가장 짧은 형. 빈 글이면 줄이 없다.
+    작업 222: anime 이면 자막 금지 문장이 같은 줄 끝에(맨 끝 줄은 157 줄이기에 끼지 않는다)."""
+    return audio_rule(has_lines, compact=True, anime=anime)
+
+
+# ---------------------------------------------------------------- 작업 222: 애니 영상 — 자막 금지 · 인물 눈 신원 · 역광 눈 보호
+# 운영(ff125d82 · g2026111013512566be): 애니 vibe 테이크 프롬프트에 자막 금지 줄이 없어 Seedance 가 자막을 그렸고, 캐릭터 외형의
+# "narrow near-black eyes" 가 프롬프트에 없어(170자 요약 · 줄이기) 역광 샷에서 눈동자가 옅은 회색 · 뺨에 밝은 삼각 조각으로 나왔다.
+# 자막 금지 = 소리 규칙 줄 끝(audio_rule anime). 눈 줄 · 역광 문장 = 애니 빌더의 줄이기 밖 자리(줄이기 단계가 먼저 돈다).
+ANIME_NO_SUBTITLES = "No subtitles, captions, speech bubbles or any on-screen text; dialogue is heard only."
+ANIME_BACKLIGHT_EYES = ("Backlight never changes eye color: keep dark irises and pupils visible; no glowing, blank or grey "
+                        "irises, no geometric light patches on the face.")
+_OLD_NO_TEXT = " No text, no subtitles, no speech bubbles."  # 222 전 애니 자막 금지 문장(소리 규칙 줄에 222 문장이 있으면 뺀다)
+NO_TEXT_SENTENCE = _OLD_NO_TEXT.strip()  # 223 fix1: 컷 단위 byteTrim 이 자르지 않는 자막 금지 문장(실사 · 222 전 애니)
+# 역광 · 림 라이트 · 뒤에서 오는 빛(샷 조명 글 lightEn).
+_BACKLIT_RE = re.compile(
+    r"\bback[- ]?(?:lit|light(?:s|ing|ed)?)\b|\brim[- ]?(?:lit|light(?:s|ing)?)\b|\bfrom behind\b|\bcontre[- ]?jour\b"
+    r"|\bcounter[- ]?light(?:s|ing)?\b|\bsilhouett\w*|\bbehind (?:him|her|them|the (?:characters?|people|person|subjects?|"
+    r"couple|pair|two))\b", re.IGNORECASE)
+_EYE_HEADS = frozenset({"eye", "eyes", "iris", "irises", "irides"})
+_EYE_TOKEN = re.compile(r"[A-Za-z][A-Za-z-]*|[^\sA-Za-z]")
+_EYE_PHRASE_STOP = frozenset({
+    "with", "and", "or", "of", "has", "have", "had", "is", "are", "a", "an", "the", "his", "her", "their", "its", "in", "on",
+    "over", "under", "behind", "above", "below", "beneath", "hair", "glasses", "but", "both", "two", "that", "which",
+})
+
+
+def _backlit(text) -> bool:
+    """작업 222: 샷 조명 글이 역광 · 림 · 뒤에서 오는 빛인가."""
+    return bool(_BACKLIT_RE.search(str(text or "")))
+
+
+def anime_eye_phrase(appearance) -> str:
+    """작업 222: 캐릭터 외형 글(appearanceEn — 실사 얼굴 문장과 같은 출처)의 눈 모양 · 눈동자 색 → 눈 줄 글. 눈 데이터가 없으면 "".
+
+    "narrow near-black eyes" · "narrow-eyed" · "eyes with tiny near-black irises" 처럼 눈 명사(eyes · irises · -eyed) 앞 같은 명사구를
+    거꾸로 읽어(접속 · 관사 · 다른 명사에서 멈춤) 모양 낱말(genre_bl 눈 모양)과 색(casting 색 낱말, 톤 + 색)을 고른다.
+    → "narrow, near-black irises with visible dark pupils" / 색만 "dark brown irises …" / 모양만 "narrow, with visible dark pupils".
+    """
+    from . import genre_bl  # noqa: PLC0415 — 늦은 가져오기(모듈 순환 없이)
+
+    shape_re = re.compile(rf"(?:{genre_bl._EYE_SHAPE_WORDS})", re.IGNORECASE)  # noqa: SLF001
+    color_re = vnew_casting._COLOR_WORD  # noqa: SLF001
+    tone_re = vnew_casting._TONE_WORD  # noqa: SLF001
+    tokens = _EYE_TOKEN.findall(str(appearance or ""))
+    shapes: list[str] = []
+    colors: list[str] = []
+    for at, token in enumerate(tokens):
+        low = token.lower()
+        words: list[str] = []
+        if low.endswith("-eyed") and len(low) > 5:
+            words.append(low[:-5])
+        elif low not in _EYE_HEADS:
+            continue
+        back = at - 1
+        while back >= 0 and len(words) < 6:
+            word = tokens[back].lower()
+            if word == ",":
+                back -= 1
+                continue
+            if not word[:1].isalpha() or word in _EYE_PHRASE_STOP:
+                break
+            words.insert(0, word)
+            back -= 1
+        tone = ""
+        found = ""
+        for word in words:
+            if shape_re.fullmatch(word):
+                if word not in shapes:
+                    shapes.append(word)
+                tone = ""
+            elif color_re.fullmatch(word):
+                found = (found + " " if found else "") + (tone + " " if tone and not found else "") + word
+                tone = ""
+            elif tone_re.fullmatch(word):
+                tone = word
+            else:
+                tone = ""
+        if not found and any(w in ("dark", "deep") for w in words):
+            found = "dark"
+        if found and found not in colors:
+            colors.append(found)
+    if not shapes and not colors:
+        return ""
+    shape = ", ".join(shapes[:2])
+    if colors:
+        return (shape + ", " if shape else "") + f"{colors[0]} irises with visible dark pupils"
+    return f"{shape}, with visible dark pupils"
+
+
+def anime_eye_line(name: str, phrase: str) -> str:
+    """작업 222: 인물 한 사람의 눈 신원 줄. phrase 가 비면 ""."""
+    name, phrase = str(name or "").strip(), str(phrase or "").strip()
+    if not name or not phrase:
+        return ""
+    return f"{name}'s eyes: {phrase} in every shot and every light."
+
+
+def _member_eyes(member: dict) -> str:
+    """작업 222: cast 항목의 눈 줄 글 — 페이로드가 캐릭터 전체 외형(appearanceEn)에서 뽑아 둔 eyes. 없으면 ""(눈 줄 없음)."""
+    return str(member.get("eyes") or "")
+
+
+def _eyes_entry(appearance) -> dict:
+    """작업 222: 애니 cast 항목에 더할 {"eyes": 눈 줄 글}. 눈 데이터가 없으면 {}(항목 모양 그대로)."""
+    phrase = anime_eye_phrase(appearance)
+    return {"eyes": phrase} if phrase else {}
+
+
+def _cut_eyes(char, is_real: bool) -> dict:
+    """작업 222: 컷 단위 cast 항목의 eyes(애니만, 캐릭터 appearanceEn). 실사면 {}(실사 프롬프트는 그대로)."""
+    if is_real or not isinstance(char, dict):
+        return {}
+    return _eyes_entry(char.get("appearanceEn"))
+
+
+def _join_labels(labels: list[str]) -> str:
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def anime_eye_block(people: list[tuple[str, str]], backlit: list[str] | None = None, *, whole: bool = False) -> list[str]:
+    """작업 222: 애니 프롬프트의 눈 줄(사람마다, 눈 데이터가 있는 사람만) + 역광 문장(역광 샷이 있을 때만).
+    people = [(표시 이름, anime_eye_phrase 글)]. backlit = 역광 샷 이름표("2", "0-4s" …), whole = 이 프롬프트가 역광 샷 하나(컷 단위)."""
+    lines = [anime_eye_line(name, phrase) for name, phrase in people]
+    lines = [line for line in lines if line]
+    if ANIME_BACKLIGHT_EYES and whole:
+        lines.append(ANIME_BACKLIGHT_EYES)
+    elif ANIME_BACKLIGHT_EYES and backlit:
+        head = ("Shot " if len(backlit) == 1 else "Shots ") + _join_labels(list(backlit))
+        lines.append(f"{head} (backlit): {ANIME_BACKLIGHT_EYES}")
+    return lines
 
 
 def has_audio_rule(text: str) -> bool:
@@ -4328,6 +4907,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     # 작업 127: 맨 앞 고정부(화풍·배경·overall tone, 켬일 때만). 예산에서 미리 빼 두어 어떤 줄이기에도 남는다.
     # 테이크 안에서 장소가 바뀌는 컷은 항목 안에 그 장소의 배경 문장을 한 번 더 쓴다(bg_change).
     fixed_head = fixed_head_compact = ""
+    fixed_old = ("", "")
     bg_change: dict[int, str] = {}
     bg_change_compact: dict[int, str] = {}
     if fx_on:
@@ -4337,6 +4917,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         first_location = next((str(e.get("locationEn") or "") for e in entries if e.get("locationEn")), "")
         fixed_head = _fixed_head(plan, first_location, real=real)
         fixed_head_compact = _fixed_head(plan, first_location, real=real, compact=True)
+        # 작업 223 fix1: background 단계가 바뀌는지는 223 전 고정부로 견준다(단계 이름이 223 전과 같게).
+        fixed_old = (_fixed_head(plan, first_location, real=real, old=True),
+                     _fixed_head(plan, first_location, real=real, compact=True, old=True))
         previous = loc_mod.normalize_name(first_location)
         for index, entry in enumerate(entries):
             where = str(entry.get("locationEn") or "")
@@ -4424,10 +5007,13 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         " Do not add any person, action or scene. No mannequins remain. "
         "No text, no subtitles, no speech bubbles."
     )
-    rules_head = rule_reproduce + rule_replace + rule_eyes + rule_extra
     # 작업 211: 소리 = 대사만(대사 줄이 없으면 — 168 audioDropped 포함 — 침묵만). 짧은 형은 RULES 짧은 형 끝에.
     # 211 fix1: 옛 소리 문장 자리라 옛 글 바이트 이하(_take_audio_rule). 211 fix2: 속마음 줄이 없으면 "inner" 낱말 없는 형(117).
-    audio_full = " " + _take_audio_rule(bool(take_lines), inner=take_voices in ("thought", "mixed"))
+    # 작업 222: 애니는 소리 규칙 끝에 자막 금지 문장(원형 · 짧은 형 RULES 둘 다) — 그 문장이 있으면 222 전 "No text …" 는 뺀다(같은 말 두 번).
+    audio_full = " " + _take_audio_rule(bool(take_lines), inner=take_voices in ("thought", "mixed"), anime=not real)
+    if not real and ANIME_NO_SUBTITLES and ANIME_NO_SUBTITLES in audio_full and rule_extra.endswith(_OLD_NO_TEXT):
+        rule_extra = rule_extra[:-len(_OLD_NO_TEXT)]
+    rules_head = rule_reproduce + rule_replace + rule_eyes + rule_extra
     avoid_full = REAL_TAKE_AVOID if real else (
         "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text.")
 
@@ -4446,7 +5032,14 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     motion_compact = MOTION_MIN + (MOTION_MIN_INNER if inner else "")
     harmony_compact = _harmony_min(plan)
     rules_compact = ("RULES: " + TEXT_RETRY_RULE + " " if no_text else "RULES: ") + TAKE_RULES_COMPACT + (
-        TAKE_RULES_COMPACT_INNER if inner else "") + " " + _take_audio_rule(bool(take_lines), compact=True)
+        TAKE_RULES_COMPACT_INNER if inner else "") + " " + _take_audio_rule(bool(take_lines), compact=True, anime=not real)
+    # 작업 222: 애니 눈 신원 줄 · 역광 문장(RULES 다음 자기 블록, 157 줄이기 밖 — 줄이기 단계가 먼저 돈다). 실사는 없다.
+    eyes_text = ""
+    if not real:
+        lights = {str(c.get("id")): shot_light(plan, c) for c in (plan.get("conti") or {}).get("cuts") or []}  # 223 fix1: 나가는 빛
+        eyes_text = "\n".join(anime_eye_block(
+            [(_disp_name(str(m.get("name") or "")), _member_eyes(m)) for m in cast if str(m.get("name") or "").strip()],
+            [f"{e['start']}-{e['end']}s" for e, cid in zip(entries, _seg_cut_ids(take)) if _backlit(lights.get(str(cid)))]))
 
     # --- 줄이기 상태(작업 157: 컷 내용 = 연기·닿는 연기·포즈·대사·ON SCREEN 은 빼지 않는다). ---
     state = {
@@ -4505,6 +5098,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 작업 143: 실사 장소는 사람을 지운 실사 사진(웹툰 뷰 편집). 작업 197: 장소 그림은 참고만(_location_ref 한 문구),
         # 줄이기 첫 단계(bgHarmony — 197 글 짧은 형)부터 짧은 형(fix1: 4,000자 안에 컷 내용을 지키려고).
         short = (state["bg_compact"] or state["bg_harmony"] != "full") if short is None else short
+        if BG_HARMONY_223 and fx_on:
+            # 작업 223: 장소 그림 이름표 = 참고 구현 reference_lead 글(조각 · 대체 · 실사 · 애니 같은 글). 223 fix1: 줄인 단계는 앞부분만
+            # (197 짧은 형보다 짧다). VNEW_FX 끔(배경 고정부 없음)은 223 전 글.
+            return location_lead(f"@Image{location_no}", short=short)
         if anchor is not None:
             # 작업 155: 조각·대체 제출의 장소 그림
             return (TAKE_ANCHOR_LOCATION_LINE_SHORT if short else TAKE_ANCHOR_LOCATION_LINE).format(no=location_no)
@@ -4805,12 +5402,14 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     def _assemble() -> str:
         # 순서: [실사 AI 고지(140, 늘 원문)] → [FIXED(127, 켬일 때만)] → STYLE → ASSETS → TIMELINE → MOTION → HARMONY
         # → RULES → AVOID. 작업 157: 맨 앞 두 줄도 예산 안에서 잰다(고정부 짧은 형 = BACKGROUND 1문장).
+        # 작업 223 fix1: 고정부 = 223 배경 줄(옛 고정부 크기 이하, _fixed_head), HARMONY 줄 끝 = 223 조화 문장(197 같은 형 이하) —
+        # 같은 단계마다 223 전 글보다 길지 않아 줄이기 단계 · 조각 수가 그대로다.
         head = fixed_head_compact if state["bg_compact"] else fixed_head
-        bg_harmony = _bg_harmony_form(real, state["bg_harmony"])  # 작업 197: HARMONY 줄 끝(없으면 그 줄 그대로)
+        bg_harmony = (char_harmony_form if BG_HARMONY_223 and fx_on else _bg_harmony_form)(real, state["bg_harmony"])
         harmony_row = state["harmony"] + (" " + bg_harmony if bg_harmony else "")
         note = (REAL_REF_AI_NOTE_COMPACT if state.get("note_compact") else REAL_REF_AI_NOTE) if real else ""  # 작업 214
         blocks = [note, head, _style(), _assets(), _timeline(), state["motion"],
-                  harmony_row, _rules(), state["avoid"]]
+                  harmony_row, _rules(), eyes_text, state["avoid"]]  # 작업 222: eyes_text(애니만, 줄이기 밖)
         return "\n".join(b for b in blocks if b)
 
     # 작업 157: 줄이기 순서. 먼저 고정 부분을 하나씩 짧은 형으로(TAKE_COMPACT_ORDER), 모두 짧은 형인데도 넘칠 때만 컷 내용을
@@ -4837,7 +5436,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         field, value = compact_steps[section]
         if section == "background":
             # 작업 197 fix1: 장소 줄은 이 단계 전(bgHarmony, 맨 앞)에 이미 짧은 형이다 — 고정부 · 장소 바뀜 글만 견준다.
-            same = fixed_head == fixed_head_compact and bg_change == bg_change_compact
+            same = fixed_old[0] == fixed_old[1] and bg_change == bg_change_compact
         elif section in ("bgHarmony", "bgHarmonyDrop"):
             same = _bg_harmony_form(real, "full" if section == "bgHarmony" else "short") == _bg_harmony_form(real, value)
         else:
@@ -6027,7 +6626,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     def _audio() -> str:
         # 작업 211: 소리 = 대사만(대사 줄이 없으면 침묵만). 211 fix1: 옛 문장이 없던 자리라 늘 가장 짧은 형(157 단계에 끼지 않는다).
-        return _vibe_audio_line(any(_entry_lines(e) for e in entries))
+        # 작업 222: 애니는 같은 줄 끝에 자막 금지 문장(맨 끝 줄 — 줄이기 밖).
+        return _vibe_audio_line(any(_entry_lines(e) for e in entries), anime=not real)
     def _style() -> str:
         key = "live_action" if real else "webtoon"
         if state["style"]:
@@ -6064,6 +6664,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     def _setting() -> str:
         # 작업 197: 같은 장소(같은 픽셀이 아님) + 조화 문장 1번(harmony 단계에서 짧은 형, harmonyDrop 에서 뺌).
+        # 작업 223 fix1: 이것은 223 전 글(옛 크기를 잴 때 · 223 끔). 223 배경 덩어리는 _assemble 이 setting_room 으로 맞춘다.
         harmony = _bg_harmony_form(real, "none" if state["harmonyDrop"] else "short" if state["harmony"] else "full")
         return f"{VIBE_SETTING_HEAD}: {_bg(first_loc)}." + (" " + harmony if harmony else "")
 
@@ -6076,6 +6677,20 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if where and loc_mod.normalize_name(where) != previous:
             moves[index] = where
             previous = loc_mod.normalize_name(where)
+    mains: dict[str, dict] = {}
+    light_delta: dict[str, tuple[int, int]] = {}  # 작업 223 fix1: 샷마다 (바이트, 글자) 223 빛 글 − 옛 빛 글(옛 크기를 잴 때 뺀다)
+    lead_old = [False]  # 작업 223 fix1: True 인 동안 장소 이름표 = 223 전 글
+
+    def _main_at(index: int) -> dict:
+        # 작업 223: 그 샷 장소(앞 장소 바뀜 중 마지막, 없으면 첫 장소)의 주 광원(같은 plan · 장소면 같은 값)
+        where = next((moves[i] for i in sorted(moves, reverse=True) if i <= index), first_loc)
+        if where not in mains:
+            mains[where] = main_light(plan, where)
+        return mains[where]
+
+    def _emitted_light(index: int, cut_id: str) -> str:
+        # 작업 223 fix1: 이 샷에 나가는 빛 글(shot_light — 역광 눈 보호 판정도 이 글)
+        return shot_light(plan, cuts_by_id.get(cut_id) or {}, _main_at(index))
 
     def _line_piece(line: dict, off_speaker: str) -> str:
         # 147/157: 모든 줄, 한 줄 한 컷, 이어지는 말(run). 대사·속마음은 늘 소리로만(spoken (audio only …)).
@@ -6302,6 +6917,13 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             parts.append(" / ".join(fx_texts))
         for field in ("cameraEn", "lightEn"):
             value = _txt(cut.get(field)).rstrip(" .")
+            if field == "lightEn" and BG_HARMONY_223:
+                old_piece = value if value and not vnew_fx.HANGUL.search(value) else ""
+                value = _txt(_emitted_light(index, cut_id)).rstrip(" .") if value else ""  # 작업 223: 장소 주 광원 기준 글
+                new_piece = value if value and not vnew_fx.HANGUL.search(value) else ""
+                # 223 fix1: 옛 크기를 잴 때 뺄 몫(조각 사이 ". " 2자 포함)
+                light_delta[cut_id] = tuple((size(new_piece) + 2 if new_piece else 0) - (size(old_piece) + 2 if old_piece else 0)
+                                            for size in (_utf8_len, len))
             if value and not vnew_fx.HANGUL.search(value):
                 parts.append(value)
         # 작업 208: 사용자가 ④에서 직접 잡은 자세(지시서가 빠뜨려도). 없으면 조각이 없다(지금 글 그대로).
@@ -6412,6 +7034,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if location_no:
             # 작업 197: 줄이기 첫 단계(harmony — 197 글 짧은 형)부터 짧은 형(fix1, 배경 짧은 형 단계에서만이던 것을 앞당김)
             lead = VIBE_LOCATION_LEAD_SHORT if state["harmony"] or state["background"] else VIBE_LOCATION_LEAD
+            if BG_HARMONY_223 and not lead_old[0]:
+                lead = location_lead("@Image{no}", short=bool(state["harmony"] or state["background"]))  # 223: reference_lead 글
             rows.append((location_no, lead.format(no=location_no)
                          + (REAL_TAKE_NO_BRAND if real else "")))  # 작업 161: 실사 장소만 상표 금지
         panels = [n for n in (panel_nos or []) if n] if not real else []
@@ -6439,17 +7063,38 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     colors = ", ".join(f"{m.get('colorName') or 'grey'} = {_disp(str(m.get('name') or ''))}"
                        for m in cast if str(m.get("name") or "").strip())
+    # 작업 222: 애니 눈 신원 줄(사람마다 — 캐릭터 전체 외형에서, look 줄 외형이 줄이기로 빠져도 남는다) · 역광 샷 눈 보호 문장.
+    eye_people = [(_disp(str(m.get("name") or "")), _member_eyes(m)) for m in cast if str(m.get("name") or "").strip()]
+    # 223 fix1: 역광 판정 = 그 샷에 나가는 빛 글(_emitted_light). eye_lines_old = 저장된 빛 글 판정(223 전 크기를 잴 때만).
+    eye_lines: list[str] = [] if real else anime_eye_block(
+        eye_people, [str(i + 1) for i, cid in enumerate(take_cut_ids) if _backlit(_emitted_light(i, cid))])
+    eye_lines_old: list[str] = [] if real else anime_eye_block(
+        eye_people, [str(i + 1) for i, cid in enumerate(take_cut_ids) if _backlit((cuts_by_id.get(cid) or {}).get("lightEn"))])
 
-    def _assemble() -> str:
+    def _assemble_with(setting_text: str, old: bool) -> str:
         # 작업 214: 실사 = 214 고지(빠듯하면 짧은 형), 애니 = 140 글 그대로(애니 프롬프트는 바꾸지 않는다).
+        lead_old[0] = old
         note = (REAL_REF_AI_NOTE_COMPACT if state.get("noteCompact") else REAL_REF_AI_NOTE) if real else REAL_REF_AI_NOTE_140
-        head = [note, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
+        head = [note, _style(), *[_look_line(m) for m in cast], *(eye_lines_old if old else eye_lines), _paragraph(), setting_text]
         video = (VIBE_VIDEO_LINE_TIGHT if tighter else VIBE_VIDEO_LINE) + (f" ({colors})" if colors else "") + "."
         if any(mirrored_by):
             # 작업 179 fix1: 프리비즈가 거꾸로인 샷이 있는 조각 — 위치는 프리비즈, 그 샷의 좌우는 Shot 줄.
             head_v, sep, tail_v = video.rpartition("; replace each mannequin with its person")
             video = head_v + VIBE_VIDEO_MIRROR + sep + tail_v if sep else video
-        return "\n".join(b for b in [*head, *shots, _labels(), video, _audio()] if b)
+        text = "\n".join(b for b in [*head, *shots, _labels(), video, _audio()] if b)
+        lead_old[0] = False
+        return text
+
+    def _assemble() -> str:
+        old = _assemble_with(_setting(), True)
+        if not BG_HARMONY_223:
+            return old
+        # 작업 223 fix1: 배경 덩어리 = 같은 단계 223 전 글(옛 배경 줄 · 197 조화 · 옛 장소 이름표 · 옛 샷 빛 · 옛 역광 줄)의 글자 · 바이트
+        # 상한을 넘지 않는 가장 긴 형(setting_room) — 줄이기 단계 · 조각 수가 223 전과 같다. 바닥은 장소 + 시간대 + 주 광원.
+        skeleton = _assemble_with(SETTING_SLOT, False)
+        delta = tuple(sum(d[k] for cid, d in light_delta.items() if cid in take_cut_ids) for k in (0, 1))
+        room = setting_room(old, skeleton, delta)
+        return skeleton.replace(SETTING_SLOT, setting_block(plan, first_loc, real=real, room=room))
 
     def _compacted() -> tuple[str, list[str]]:
         text = _assemble()
@@ -6592,6 +7237,7 @@ def _vibe_anime_cast(actors: list[dict], char_by_id: dict, resolved: dict, cap: 
             "refNos": nos,
             "look": "webtoon",
             "appearance": _short_appearance(appearance, 170),
+            **_eyes_entry(appearance),  # 작업 222: 전체 외형에서(170자 요약이 눈 문장을 자를 수 있다)
             "costume": str(member.get("costume") or ""),
             "voice": str(member.get("voice") or ""),
         })
@@ -6801,6 +7447,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
             "frontNo": front_no,
             # 외형은 참조 정면 + 요약(얼굴·머리만, 옷 문구 제거).
             "appearance": _short_appearance(appearance, 170),
+            # 작업 222: 눈 신원 = 캐릭터 전체 외형(appearanceEn — 실사 얼굴 문장과 같은 출처, 정면이 안 읽혀도)
+            **_eyes_entry(str((char or {}).get("appearanceEn") or "") or appearance),
             "costume": str(member.get("costume") or ""),
             "voice": str(member.get("voice") or ""),
         })
@@ -10449,7 +11097,8 @@ def _kling_hard_cut_images(plan: dict, ctx: dict, cut_id: str, n_elements: int, 
     sheet = _cut_location_view(plan, cut_id, found=found) if room > 0 else None
     if sheet is not None:
         images.append((str(found.get("key") or ""), sheet[0]))
-        lines.append(REAL_CUT_IMAGE_LOCATION.format(tag=f"@Image{len(images)}"))
+        lines.append(location_lead(f"@Image{len(images)}", short=True) + "." if BG_HARMONY_223  # 223: reference_lead 글(컷 1개 = 짧은 형)
+                     else REAL_CUT_IMAGE_LOCATION.format(tag=f"@Image{len(images)}"))
     if len(images) < room:
         if not (isinstance(look, (bytes, bytearray)) and look) and fallback is not None:
             look, look_key = fallback()
@@ -12143,10 +12792,12 @@ def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, varian
                     element["reference_image_urls"] = []
                 elements.append(element)
                 appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip()
-                cast.append({"colorName": color_name, "name": name, "elementRef": f"@Element{element_index}", "appearance": appearance})
+                cast.append({"colorName": color_name, "name": name, "elementRef": f"@Element{element_index}", "appearance": appearance,
+                             **_cut_eyes(char, is_real)})  # 작업 222
                 continue
         # charId 없음(또는 정면 로드 실패/정원 초과) → CAST 색 문장만.
-        cast.append({"colorName": color_name, "name": name, "elementRef": "", "appearance": actor.get("appearanceEn") or ""})
+        cast.append({"colorName": color_name, "name": name, "elementRef": "", "appearance": actor.get("appearanceEn") or "",
+                     **_cut_eyes(char or actor, is_real)})  # 작업 222
 
     image_urls: list[bytes] = []
     if max_image_urls > 0 and len(elements) + max_image_urls <= vnew_settings.PREVIZ_MAX_INPUTS:
@@ -12198,10 +12849,12 @@ def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, vari
                 image_urls.append(_fit_ref(front))
                 image_no = len(image_urls)  # 1부터, 실제 순서와 일치
                 appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip()
-                cast.append({"colorName": color_name, "name": name, "imageNo": image_no, "appearance": appearance})
+                cast.append({"colorName": color_name, "name": name, "imageNo": image_no, "appearance": appearance,
+                             **_cut_eyes(char, is_real)})  # 작업 222
                 placed = True
         if not placed:
-            cast.append({"colorName": color_name, "name": name, "imageNo": None, "appearance": actor.get("appearanceEn") or ""})
+            cast.append({"colorName": color_name, "name": name, "imageNo": None, "appearance": actor.get("appearanceEn") or "",
+                         **_cut_eyes(char or actor, is_real)})  # 작업 222
 
     # (웹툰) 그림체 참고 1장(원작 웹툰 컷). 인물 이미지 뒤에 둔다(번호는 인물에만 쓴다).
     has_style_ref = False
@@ -12379,6 +13032,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     cut_fx = vnew_fx.fx_list(cut.get("fx"), vnew_fx.FX_MAX) if fx_on else []
     cut_mood = vnew_fx.clean_text(cut.get("moodEn"), vnew_fx.MOOD_EN_MAX) if fx_on else ""
     # 작업 127: 기호 대상 인물 · 맨 앞 고정부(화풍·배경·overall tone) · 보이는 인물만 "Only … appear". 켬일 때만.
+    # 작업 223 fix1: 고정부 = 223 배경 줄(같은 장소면 통 테이크 · Kling 과 같은 글, 223 전 고정부 크기 이하 — _fixed_head).
     cut_who = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut)) if fx_on else {}
     fixed_head = _fixed_head(plan, str(cut.get("locationEn") or ""), real=is_real) if fx_on else ""
     cast_names = [str(m.get("name") or "").strip() for m in cast if str(m.get("name") or "").strip()]
@@ -12517,7 +13171,15 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
 
     # 작업 211: 소리 규칙 짧은 형(2,500B 컷 단위 — 대사만 / 말 없는 컷은 침묵만). 211 fix2: 프롬프트 맨 끝 자기 줄(줄이기가 건드리지
     # 않는다, 예산에는 든다). 규칙이 빈 글이면(검사의 211 끔) 줄이 없다.
-    audio_line = audio_rule(any_spoken, compact=True)
+    audio_line = audio_rule(any_spoken, compact=True, anime=not is_real)
+    if not is_real:
+        # 작업 222: 애니 눈 신원 줄(CAST 인물마다) · 역광 컷 눈 보호 문장을 소리 규칙 줄 앞에 — 맨 끝 묶음이라 줄이기 · byteTrim 밖.
+        # 223 fix1: 역광 판정 = 나가는 빛 글(shot_light — 장소 주 광원 기준, 끔이면 저장된 글).
+        brief_cut = {"lightEn": brief.get("lightEn"), "locationEn": cut.get("locationEn")}
+        eye_block = anime_eye_block([(str(m.get("name") or "").strip(), _member_eyes(m)) for m in cast
+                                     if str(m.get("name") or "").strip()],
+                                    whole=_backlit(shot_light(plan, cut)) or _backlit(shot_light(plan, brief_cut)))
+        audio_line = "\n".join([*eye_block, audio_line] if audio_line else eye_block)
 
     # CONTINUITY — @Video1 재현 + 인물 교체 + 임의 추가 금지 + 고퀄 실사/웹툰 마감(설계자 2026-10-22,
     # 뉴테이크 실전 프롬프트). 웹툰판은 live-action 대신 원작 웹툰 그림체로 마감한다.
@@ -12544,6 +13206,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "not in @Video1. " + finish_clause + " "
         "No text, no subtitles, no speech bubbles."
     )
+    if not is_real and ANIME_NO_SUBTITLES and ANIME_NO_SUBTITLES in audio_line and continuity_tail.endswith(_OLD_NO_TEXT):
+        continuity_tail = continuity_tail[:-len(_OLD_NO_TEXT)]  # 작업 222: 자막 금지는 맨 끝 소리 규칙 줄(자르지 않는 자리)이 말한다
 
     def _continuity(with_body: bool) -> str:
         # vnew-live-fx RA5.2: 손 두 개·머리색·무늬 위치 문장은 "The mannequin colors" 앞(끔·bodyDrop 이면 없음).
@@ -12575,6 +13239,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     harmony_short = _harmony_line(plan, False)
     # 작업 197: HARMONY 줄 끝 조화 문장 짧은 형(2,500B 컷 단위). fix1: 넘치면 맨 먼저 뺀다(197 전 글을 줄이기 전에).
     bg_harmony = _bg_harmony(is_real, short=True)
+    if BG_HARMONY_223 and fixed_head:
+        # 작업 223 fix1: 같은 자리(HARMONY 줄 끝)에 223 조화 문장 짧은 형(197 짧은 형 이하 — 줄이기 단계 그대로, harmonyDrop 에서 빠짐).
+        # HARMONY 줄(시간대 · 빛 · 접지 그림자)은 그대로 둔다 — 배경 줄은 맨 앞 고정부.
+        bg_harmony = char_harmony_form(is_real, "short")
 
     cut_user_pose = user_pose_text(plan, cut_id)  # 작업 208(없으면 None — 프롬프트 글자 그대로)
 
@@ -12603,7 +13271,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             assets_line, head, cast_line if apps is None else _cast_line(apps), only_line, shot_line, blocking_line,
             action_line, _fx_line(fx_short),
             motion_short, mood_line, setting_line,
-            harmony_short + (" " + bg_harmony if bg_harmony and state.get("bg_harmony", True) else ""), dlg, _continuity(body),
+            " ".join(p for p in (harmony_short, bg_harmony if bg_harmony and state.get("bg_harmony", True) else "") if p),
+            dlg, _continuity(body),
             audio_line,
         ]
         return "\n".join(b for b in blocks if b)
@@ -12764,11 +13433,17 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # 그래도 넘치면 전체를 바이트로 자른다(최후). CAST·CONTINUITY 가 이미 들어간 뼈대 기준.
     applied.append("byteTrim")
     text = _current()
+    # 223 fix1: 자막 금지 문장(실사 CONTINUITY 끝 · 222 전 애니)은 자르지 않는다 — 떼어 두고 앞 글을 자른 뒤 끝에 다시 붙인다.
+    guard = NO_TEXT_SENTENCE if BG_HARMONY_223 and NO_TEXT_SENTENCE in text else ""
+    if guard:
+        text = text.replace(" " + guard, "", 1) if " " + guard in text else text.replace(guard, "", 1)
+    room = budget - ((_utf8_len(guard) + 1) if guard else 0)
     if audio_line and text.endswith("\n" + audio_line):
         # 211 fix2: 소리 규칙 맨 끝 줄은 자르지 않는다(그 앞 글을 자르고 줄을 다시 붙인다).
-        rest = _trim_utf8(text[: -len(audio_line) - 1], budget - _utf8_len(audio_line) - 1)
-        return _done(rest + "\n" + audio_line)
-    return _done(_trim_utf8(text, budget))
+        rest = _trim_utf8(text[: -len(audio_line) - 1], room - _utf8_len(audio_line) - 1)
+        return _done((rest.rstrip() + " " + guard if guard else rest) + "\n" + audio_line)
+    rest = _trim_utf8(text, room)
+    return _done(rest.rstrip() + " " + guard if guard else rest)
 
 
 def _previz_timeline_text(plan: dict, seg: dict) -> str:
@@ -13038,18 +13713,29 @@ def _background_sentence(text: str) -> str:
     return str(text or "").split("; ", 1)[0].strip().rstrip(" ,;:.")
 
 
-def _fixed_head(plan: dict, location_en: str, *, real: bool = False, compact: bool = False) -> str:
+def _fixed_head(plan: dict, location_en: str, *, real: bool = False, compact: bool = False, old: bool = False,
+                setting: str | None = None) -> str:
     """프롬프트 맨 앞 고정부 1줄(작업 127): [화풍 1구절] + [배경 1문장] + [overall tone(있으면 1번)].
 
     compact(작업 157, 통 테이크 줄이기): 배경은 첫 조각(장소 이름 + 실내/실외)만.
     작업 197: 배경 머리 = FIXED_BACKGROUND_HEAD(같은 장소 — 같은 픽셀을 지키라는 뜻이 아니다).
+    작업 223: 배경 = setting_block(장소 · 시간대 · 주 광원 · 소품 · 팔레트 + 조화 문장). 223 fix1: setting 을 주면 그 글(빌더가 setting_room
+    으로 맞춘 형, 또는 SETTING_SLOT 자리표), old=True 면 223 전 글(빌더가 같은 단계의 옛 크기를 잴 때).
     """
     style = FIXED_REAL_STYLE if real else FIXED_WEBTOON_STYLE
+    tone = _overall_tone(plan)
+    if BG_HARMONY_223 and not old:
+        if setting is None:
+            # 223 fix1: 같은 장소 · 같은 형이면 늘 같은 글(127 — 통 테이크 · 컷 · Kling 고정부가 바이트까지 같다). 크기 = 223 전 고정부(같은
+            # compact) 이하(조화 문장은 그 빌더의 197 조화 자리 — HARMONY 줄 끝 · 고정부 다음 줄). 바닥은 장소 + 시간대 + 주 광원.
+            old_text = _fixed_head(plan, location_en, real=real, compact=compact, old=True)
+            skeleton = f"FIXED: {style}. {SETTING_SLOT}" + (f" Overall tone: {tone}." if tone else "")
+            setting = setting_block(plan, location_en, real=real, room=setting_room(old_text, skeleton), harmony=False)
+        return f"FIXED: {style}. {setting}" + (f" Overall tone: {tone}." if tone else "")
     background = _background_en(plan, location_en, real=real)
     if compact:
         background = _background_sentence(background)
     text = f"FIXED: {style}. {FIXED_BACKGROUND_HEAD}: {background}."
-    tone = _overall_tone(plan)
     if tone:
         text += f" Overall tone: {tone}."
     return text
@@ -13839,10 +14525,25 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
         tail.append(_with_audio("No text, no subtitles, no speech bubbles.", bool(box["dialogue"])))  # 211
         if not state["negative"]:
             tail.append(_real_cut_negative_line())  # 작업 211: 소리 부정어도 이 줄과 함께(줄이기 마지막 단계에서 빠진다)
+        harmony = "none" if state.get("harmonyDrop") else "short" if state.get("harmonyShort") else "full"
+        if BG_HARMONY_223:
+            # 작업 223 fix1: BACKGROUND 자리 = 223 배경 줄(옛 짧은 고정부 크기 이하 — 통 테이크 · 컷과 같은 장소 같은 글). 조화 줄 = 223 조화
+            # 문장(197 같은 형 이하, 같은 단계에서 짧은 형 · 뺌). background 단계: 시작 그림이 있는 컷(i2v)은 223 전처럼 줄을 뺀다 — 시작
+            # 그림이 그 장소 · 빛을 그대로 싣고, 바닥 줄(≈ 120 B)을 남기면 ACTION 이 잘렸다(prod 스냅숏 cut-12). 시작 그림이 없는 하드 컷
+            # elements 는 바닥 배경 줄(장소 + 주 광원 — 시간대는 바로 아래 시간대 문장, 화풍은 STYLE 줄)을 남긴다.
+            time_line = _real_time_sentence(plan)
+            if not state["background"]:
+                background = _fixed_head(plan, cut_location, real=True, compact=True)
+            elif no_start:
+                background = setting_block(plan, cut_location, real=True, room=0, harmony=False, time=not time_line)
+            else:
+                background = ""
+            harmony_row = char_harmony_form(True, harmony)
+        else:
+            background = "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True)
+            harmony_row = _bg_harmony_form(True, harmony)  # 작업 197
         rows = [REAL_REF_AI_NOTE_COMPACT if state.get("noteCompact") else REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"],
-                *[str(r) for r in kling.get("refs") or []],
-                "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True),
-                "" if state.get("harmonyDrop") else _bg_harmony(True, short=bool(state.get("harmonyShort"))),  # 작업 197
+                *[str(r) for r in kling.get("refs") or []], background, harmony_row,
                 _real_time_sentence(plan), start, style, *tail]
         return "\n".join(r for r in rows if r)
 
@@ -13885,7 +14586,9 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
 
     def _head(short: bool, note_compact: bool = False) -> str:
         # 작업 197: 고정부 다음 줄 = 조화 문장(머리라 빠지지 않는다 — 가운데가 넘치면 짧은 형으로 먼저 바꾼다).
-        harmony = _bg_harmony(True, short=short)
+        # 작업 223 fix1: 고정부 = 223 배경 줄(옛 고정부 크기 이하), 다음 줄 = 223 조화 문장(197 같은 형 이하) — 가운데 줄이기가 그대로.
+        harmony = (char_harmony_form(True, "short" if short else "full") if BG_HARMONY_223
+                   else _bg_harmony(True, short=short))
         return "\n".join([
             REAL_REF_AI_NOTE_COMPACT if note_compact else REAL_REF_AI_NOTE,  # 작업 140 · 214: 첫 줄(머리라 줄이기에서 빠지지 않는다)
             *([str(lock).strip()] if str(lock or "").strip() else []),  # 작업 169: 샷 고정(구도 먼저, 없으면 줄 없음 — 지금과 같다)
@@ -14036,7 +14739,7 @@ def _anime_prompt(owner: str, plan: dict, reference_count: int = 0) -> str:
         return (
             "Redraw @Video1 in a hand-drawn Korean webtoon style. Keep every character, the camera "
             "movement, composition, timing and action exactly the same as @Video1. "
-            "No text, no speech bubbles."
+            + (ANIME_NO_SUBTITLES or "No text, no speech bubbles.")  # 작업 222(옛 글 = 괄호 뒤)
         )
     refs = _anime_ref_labels(reference_count)
     prompt = (
@@ -14044,7 +14747,7 @@ def _anime_prompt(owner: str, plan: dict, reference_count: int = 0) -> str:
         "copy their line quality and thickness, coloring and shading, color palette and the way faces, "
         "eyes and hair are drawn. Do NOT use a generic anime, cartoon or glossy style. Keep every "
         "character, the camera movement, composition, timing and action exactly the same as @Video1. "
-        "No text, no speech bubbles."
+        + (ANIME_NO_SUBTITLES or "No text, no speech bubbles.")  # 작업 222(옛 글 = 괄호 뒤)
     )
     style_en = _first_style_en(owner, plan)
     if style_en:

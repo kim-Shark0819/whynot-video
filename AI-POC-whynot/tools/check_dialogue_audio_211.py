@@ -100,6 +100,10 @@ def check_dialogue_audio_211() -> bool:
 
     saved_char = gm._char_by_id  # noqa: SLF001
     gm._char_by_id = lambda owner, plan: {}  # noqa: SLF001 — 캐릭터 저장소 없이
+    # 222: 애니 소리 규칙 줄 끝 자막 금지 문장 · 눈 줄은 222 가 본다(check_anime_prompt_222). 이 검사의 211 기대값(규칙 줄 글자 ·
+    # 바이트 중립)은 222 전 글이라 222 를 끈 채로 돈다.
+    off222 = __import__("check_anime_prompt_222").anime_222_off()  # 222
+    off222.__enter__()  # 222
     full, compact = gm.AUDIO_DIALOGUE_ONLY, gm.AUDIO_DIALOGUE_ONLY_COMPACT
     # 211 fix2: 속마음 줄이 없는 통 테이크 원형은 "inner" 낱말 없는 형(이 계획의 "(속마음)" 글은 속마음 판정이 아니다 — spoken 만)
     full_sp = gm.AUDIO_DIALOGUE_ONLY_SPOKEN
@@ -320,6 +324,7 @@ def check_dialogue_audio_211() -> bool:
         except Exception as exc:  # noqa: BLE001
             crash("d-i", exc)
     finally:
+        off222.__exit__(None, None, None)  # 222
         gm._char_by_id = saved_char  # noqa: SLF001
 
     ok = True
