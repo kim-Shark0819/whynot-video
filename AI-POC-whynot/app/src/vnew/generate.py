@@ -1801,7 +1801,44 @@ def _real_ready_error(gen: dict) -> VpocError | None:
         )
     if gen.get("status") == "running" and not _gen_stale(gen):
         return VpocError("vnew.generate.real", "RealRunning", "영상 생성이 진행 중입니다. 끝난 뒤에 다시 눌러 주세요.", 409)
+    if _take_real_active(gen):
+        # 작업 221: 테이크별 [실사 다시]로 만드는 칸이 있다(gen 이 partial·멈춤으로 보여도). 회차를 또 시작하면 두 번 계상한다.
+        return VpocError("vnew.generate.real", "RealRunning", "실사 테이크를 아직 만드는 중입니다. 끝난 뒤에 다시 눌러 주세요.", 409)
     return None
+
+
+# 작업 221: 칸이 "만드는 중"인 상태 — 화면 takeRealCounts 의 active 와 같다.
+TAKE_ACTIVE_STATES = ("queued", "preparing", "submitted")
+
+
+def _take_real_active(gen: dict) -> bool:
+    """작업 221: 통 테이크 gen 에 실사 칸이 만드는 중(TAKE_ACTIVE_STATES)인 테이크가 있으면 True."""
+    gen = gen if isinstance(gen, dict) else {}
+    if gen.get("mode") != "previz-take":
+        return False
+    return any(isinstance(unit, dict) and (unit.get("real") or {}).get("status") in TAKE_ACTIVE_STATES
+               for unit in gen.get("units") or [])
+
+
+def _take_cell_recent(gen: dict, now: datetime) -> bool:
+    """작업 221: 통 테이크 칸(실사·웹툰) 가운데 만드는 중이고 GEN_STALL_S 안에 선점·갱신(claimedAt)된 칸이 있으면 True.
+
+    claimedAt 은 선점 때 두고(제출 뒤 조회 중에도 남는다), 콘텐츠 검사 다시 내기·likeness 단계는 칸을 queued 로 되돌려 다시
+    선점하며, 컷 단위 Kling 은 컷마다 갱신한다(_touch_prepare_claim). 그래서 테이크 하나가 30분을 넘겨도 계속 움직이면 True 다.
+    """
+    if gen.get("mode") != "previz-take":
+        return False
+    for unit in gen.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        for variant in ("real", "webtoon"):
+            state = unit.get(variant) or {}
+            if state.get("status") not in TAKE_ACTIVE_STATES:
+                continue
+            claimed = plan_mod._parse_iso(state.get("claimedAt") or "")
+            if claimed and (now - claimed).total_seconds() <= GEN_STALL_S:
+                return True
+    return False
 
 
 def _real_missing_names(owner: str, plan: dict, gen: dict) -> list[str]:
@@ -14228,6 +14265,7 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audi
                     g["finalReal"]["n"] = int((g.get("realRun") or {}).get("n") or 0)
             else:
                 g["finalWebtoon"] = {"status": "waiting", "key": "", "error": ""}
+            # 작업 221: partial·failed gen 도 running 으로 되돌린다 — 드라이버(_drive 는 running 만 돈다)와 병합(finalReal)이 이어 간다.
             g["status"] = "running"
             g["activeSince"] = now_iso()
             return
@@ -14554,7 +14592,10 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
 
 
 def _reconcile_gen_stale(gen: dict) -> dict:
-    """조회 때: gen 이 오래 running 이면 뷰에서 partial 로 본다(저장하지 않음)."""
+    """조회 때: gen 이 오래 running 이면 뷰에서 partial 로 본다(저장하지 않음).
+
+    작업 221: 통 테이크 칸이 만드는 중이고 최근에 선점·갱신됐으면 멈춤으로 보지 않는다(_gen_stale → _take_cell_recent).
+    """
     if gen.get("status") == "running" and _gen_stale(gen):
         gen = dict(gen)
         gen["status"] = "partial"
@@ -14569,7 +14610,12 @@ def _gen_stale(gen: dict) -> bool:
     created = plan_mod._parse_iso(gen.get("activeSince") or gen.get("createdAt") or "")
     if not created:
         return False
-    return (datetime.now(timezone.utc) - created).total_seconds() > GEN_STALL_S
+    now = datetime.now(timezone.utc)
+    if (now - created).total_seconds() <= GEN_STALL_S:
+        return False
+    # 작업 221: 테이크 하나를 [실사 다시] 한 뒤 콘텐츠 검사 다시 내기·Kling 컷 단위로 30분을 넘겨도, 그 칸이 최근에
+    # 선점·갱신됐으면 멈춘 것이 아니다(보기가 partial 이 되어 [실사 버전 다시 만들기]를 보이던 결함).
+    return not _take_cell_recent(gen, now)
 
 
 def _gen_previz_stale(gen: dict, plan: dict) -> bool:
@@ -15495,16 +15541,46 @@ def retake_template(owner: str, pid: str, gen_id: str, *, variant: str, cell_id:
     return {"prompt": prompt, "refCount": count, "path": path}
 
 
-def _charge_retake(owner: str, pid: str, gen_id: str, result: dict, model: str, seconds: float, usd: float) -> None:
-    """새 길 다시 만들기 제출 1회 계상(견적 금액, 키 = 작업 토큰 — 중복 방지). 실패는 경고만."""
+def _charge_retake(owner: str, pid: str, gen_id: str, result: dict, model: str, seconds: float, usd: float,
+                   price_unknown: bool = False) -> None:
+    """새 길 다시 만들기 제출 1회 계상(견적 금액, 키 = 작업 토큰 — 중복 방지). 실패는 경고만.
+    작업 220b: price_unknown 이면 원장 항목 priceUnknown: True(아는 금액이면 예전과 같은 호출 — priceUnknown 칸 없음)."""
     token = str((result or {}).get("clientRequestToken") or "")
     if not token:
         return
     try:
         vpoc_ledger.charge(token, kind="video", model=str(model or ""), units=float(seconds or 0), usd=float(usd or 0), user=owner,
-                           project_id=pid, plan_id=gen_id)
+                           project_id=pid, plan_id=gen_id, **({"price_unknown": True} if price_unknown else {}))
+        if price_unknown:
+            log.warning("vnew.gen.retake_price_unknown pid=%s model=%s usd_estimate=%.4f", pid, model, float(usd or 0))
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.gen.charge_retake_failed pid=%s err=%s", pid, type(exc).__name__)
+
+
+# 작업 220b: 단가를 못 읽고 설정 기본 단가(VNEW_TAKE_TOKEN_UNIT_PRICE · VNEW_PREVIZ_EDIT_USD_PER_S)도 0 이하일 때의 원장 추정 단가.
+# 출처: settings 의 기본값과 같은 수 — 참고 영상 경로 Seedance fal 가격 "1000 tokens" 당 $0.0214, 영상 편집 경로 Kling O3 edit
+# standard 초당 $0.14(settings 주석: 실측). 네트워크 없이 다시 확인하지 않았다.
+RETAKE_FALLBACK_TOKEN_UNIT_PRICE = 0.0214
+RETAKE_FALLBACK_USD_PER_S = 0.14
+
+
+def _retake_charge_usd(info: dict) -> tuple[float, bool]:
+    """작업 220b: 다시 만들기 원장 금액과 가격 모름 여부. 단가를 알면 견적 그대로 (금액, False).
+    모르면 견적(_retake_price 가 기본 단가표 _take_usd · _previz_model_unit_price 로 낸 추정)을 쓰고, 그것이 0 이하면
+    공개 단가 상수(위)로 다시 센다 — (금액, True), 0 아님."""
+    usd = float(info.get("usd") or 0)
+    if info.get("priceKnown"):
+        return usd, False
+    if usd <= 0:
+        seconds = max(0.0, float(info.get("billedSeconds") or 0))
+        if info.get("path") == "take":
+            width, height = vnew_settings.TAKE_RESOLUTION_WH.get(str(info.get("resolution") or ""),
+                                                                 vnew_settings.TAKE_RESOLUTION_WH["480p"])
+            usd = (width * height * 24.0 * seconds / 1024.0) / 1000.0 * RETAKE_FALLBACK_TOKEN_UNIT_PRICE
+        else:
+            usd = RETAKE_FALLBACK_USD_PER_S * seconds
+        usd = round(usd, 4)
+    return (usd if usd > 0 else RETAKE_FALLBACK_USD_PER_S), True
 
 
 def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: str, prompt: str, tag: str, model: str,
@@ -15603,7 +15679,8 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
         params.update(videoSource="result", sourceSegments=len(segs), sourceSeconds=seconds)  # 작업 194: 조각 키는 videoKeys(기록은 글·수만)
     elif source_key:
         params.update(videoSource="result", sourceIn=round(float(src_in), 3), sourceOut=round(float(src_out), 3))
-    _charge_retake(owner, pid, gen_id, result, model, float(info["billedSeconds"] or 0), float(info["usd"] or 0))
+    usd, unknown = _retake_charge_usd(info)  # 작업 220b: 가격 모름이면 추정 금액 + priceUnknown(조용히 0 아님)
+    _charge_retake(owner, pid, gen_id, result, model, float(info["billedSeconds"] or 0), usd, price_unknown=unknown)
     log_id = _log_attempt(owner, pid, gen_id, source="retake", mode=mode, variant=variant, cell_id=str(cell_id), index=index,
                           attempt=attempt, run=run_n, endpoint=model, params=params, refs=refs, video_keys=video_keys, result=result,
                           prompt=prompt, version=version)

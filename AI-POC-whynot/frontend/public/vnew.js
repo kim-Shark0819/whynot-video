@@ -2380,7 +2380,9 @@
     var task = plan.task || {};
     var previz = plan.previz || {};
     var gen = plan.gen || {};
-    var genRunning = gen.status === "running";
+    // 작업 221: 통 테이크 실사 칸을 만드는 중(takeRealCounts active)이면 gen.status 가 partial(멈춤 보기)이어도 다시 불러온다.
+    // 만드는 칸이 없으면 지금처럼 멈춘다.
+    var genRunning = gen.status === "running" || takeRealActive(gen);
     var previzDesigning = previz.status === "designing";
     var locBuilding = locationsBuilding(plan);
     var briefRunning = (previz.shotBrief || {}).status === "running"; // 촬영 지시서 만드는 중(약 1분)도 다시 불러온다
@@ -2418,6 +2420,17 @@
       if (w === "preparing" || w === "queued" || w === "waiting") return true;
     }
     return false;
+  }
+
+  /* 작업 221: 통 테이크 실사 칸을 만드는 중(queued·preparing·submitted)인 테이크가 있으면 true.
+     takeRealCounts(gen).active > 0 과 같다(검사 check_take_retry_221 r-g 가 맞춰 본다). 폴링 구역 안에 두어 이 구역만 읽는 검사도 돈다. */
+  function takeRealActive(gen) {
+    var g = gen || {};
+    if (g.mode !== "previz-take" || !Array.isArray(g.units)) return false;
+    return g.units.some(function (unit) {
+      var status = ((unit || {}).real || {}).status;
+      return status === "queued" || status === "preparing" || status === "submitted";
+    });
   }
 
   /* ⑤ 화면에 보이는 gen 상태 서명(095 피드백 2, 2026-10-30). 폴링으로 받은 plan 의 서명이 지금 그린 ⑤와 같으면
@@ -8684,15 +8697,18 @@
     return counts;
   }
 
-  /* 실사 열 상태: none(회차 없음) · running(만드는 중·이어 붙이는 중) · done · failed · cancelled. */
+  /* 실사 열 상태: none(회차 없음) · running(만드는 중·이어 붙이는 중) · done · failed · cancelled.
+     작업 221: 만드는 칸(active)이 하나라도 있으면 gen.status(partial·멈춤 보기 등)와 상관없이 running —
+     테이크별 [실사 다시] 중에 "멈췄습니다"·[실사 버전 다시 만들기 ($X)](회차 전체 다시 계상)를 보이지 않는다. */
   function takeRealState(gen) {
     var g = gen || {};
     if (!g.realRun) return "none";
+    var counts = takeRealCounts(g);
+    if (counts.active > 0) return "running";
     var final = g.finalReal || {};
     if (final.status === "done") return "done";
     if (final.status === "failed") return "failed";
-    var counts = takeRealCounts(g);
-    if (g.status === "running" && (counts.active > 0 || counts.completed === counts.total)) return "running";
+    if (g.status === "running" && counts.completed === counts.total) return "running";
     return counts.cancelled > 0 && counts.failed === 0 ? "cancelled" : "failed";
   }
 
@@ -17602,6 +17618,11 @@
 
   function editTxSelect(ctx, kind, id) {
     ctx.txSel = kind ? { kind: kind, id: id } : null;
+    if (kind && ctx.mixSel) {
+      ctx.mixSel = null; // 작업 220: 고른 것은 하나 — 자막을 고르면 고른 소리 아이템은 풀린다(Delete 가 방금 고른 것을 지운다)
+      ctx.mixKey = null;
+      editMixRender(ctx);
+    }
     (ctx.txEls || []).forEach(function (rec) {
       var on = !!ctx.txSel && rec.kind === ctx.txSel.kind && rec.id === ctx.txSel.id;
       rec.el.classList[on ? "add" : "remove"]("is-selected");
@@ -19424,6 +19445,7 @@
   function editMixPick(ctx, t, i) {
     ctx.mixSel = t === null ? null : { t: t, i: i };
     ctx.mixKey = null;
+    if (t !== null && ctx.txSel) editTxSelect(ctx, null); // 작업 220: 고른 것은 하나 — Delete 가 방금 고른 소리 아이템을 지운다
     if (t !== null && ctx.sel >= 0) {
       ctx.sel = -1;
       ctx.multi = [];

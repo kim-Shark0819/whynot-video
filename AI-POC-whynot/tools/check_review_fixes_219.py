@@ -477,8 +477,9 @@ def check_review_fixes_219() -> bool:  # noqa: C901, PLR0915 — 묶음마다 �
                 expect("rf-11", [remembered, est["priceKnown"], k1.startswith("vnew-sep-"), round(kw1["usd"], 6), kw1.get("price_unknown"),
                                  st1.get("priceUnknown"), st1.get("usdEstimate"), kw2["usd"], kw2.get("price_unknown"), st2.get("priceUnknown"),
                                  len(logs.messages("price_unknown")) >= 2],
-                       [{"unitPrice": 0.02, "unit": "seconds"}, False, True, 0.06, True, True, 0.06, 0.0, True, True, True],
-                       "가격 모름: 마지막 단가 × 3초 = 0.06 추정 · priceUnknown(상태 · 원장 호출 · 경고 로그) · 단가도 모르면 0 + 표시")
+                       [{"unitPrice": 0.02, "unit": "seconds"}, False, True, 0.06, True, True, 0.06,
+                        round(sep.FALLBACK_USD_PER_S * 3.0, 6), True, True, True],
+                       "가격 모름: 마지막 단가 × 3초 = 0.06 추정 · priceUnknown(상태 · 원장 호출 · 경고 로그) · 단가도 모르면 공개 단가 추정(작업 220a) + 표시")
             except Exception as exc:  # noqa: BLE001
                 crash("rf-11", exc)
 

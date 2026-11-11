@@ -37594,6 +37594,8 @@ _EDU_STEP_SLICES = (
     ("  /* ---------------------------------------------------------------- 단계 막대 */", "  /* 공통 오류 줄(서버 envelope message). */"),
     ("  /* 공통 오류 줄(서버 envelope message). */", "  /* ---------------------------------------------------------------- 불러오기 · 저장 */"),
     ("  /* 처음 열 때(또는 task 진행 중) 알맞은 단계를 고른다.", "  /* 공간 시트를 만드는 중인 장소가 하나라도 있으면 true"),
+    # 221: schedulePlanPoll 이 부르는 takeRealActive(혼자 도는 함수 — 다른 도우미 없음).
+    ("  /* 작업 221: 통 테이크 실사 칸을 만드는 중", "  /* ⑤ 화면에 보이는 gen 상태 서명"),  # 221
     ("  function renderPlan() {", "  /* ================================================================ ① 입력 */"),
     ("  /* 영상 내려받기 링크(presigned URL).", "  /* ⑤ 시작 화면(촬영 지시서 카드"),
     ("  function renderSoundStep(host) {", "  /* 대본 entries 의 화자·대사·컷 시간대를 읽기 전용으로. */"),
@@ -68778,6 +68780,8 @@ def main() -> int:
     if not __import__("check_css_balance").check_css_balance(): fail("CSS 괄호 균형 검사 실패(닫히지 않은 규칙)")
     if not __import__("check_review_fixes_219").check_review_fixes_219(): fail("작업 219: 리뷰 고침(내보내기 순서 · 대사 무음 · 분리 · 대사 다시 만들기) 검사 실패")
     if not __import__("check_review_fixes_219b").check_review_fixes_219b(): fail("작업 219b: ⑦ 리뷰 고침(키 · 지우기 · 잠금 · 프리미어 컨트롤) 검사 실패")
+    if not __import__("check_review_items_220").check_review_items_220(): fail("작업 220 리뷰 항목 1~14 검증 실패")
+    if not __import__("check_take_retry_221").check_take_retry_221(): fail("작업 221: 테이크별 실사 다시 뒤 진행 상태 · 회차 전체 다시 만들기 막기 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
