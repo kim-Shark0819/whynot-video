@@ -44,6 +44,7 @@ GROUPS = {
     "b-g": "222 줄 그대로 · 역광 눈 보호 = 나가는 빛 글로 판정",
     "b-h": "자막 금지 문장은 잘리지 않는다(byteTrim · Kling)",
     "b-i": "저장된 프롬프트 그대로 · 212 배경 줄 한 번만",
+    "b-l": "223 fix2: setting-line props stay whole (no clipped fragments such as \"Black U-shaped\")",
     "b-j": "옛 동작 변이를 검사가 잡는다",
     "b-k": "바꾼 파일 LF",
 }
@@ -164,7 +165,8 @@ def _group_setting(gm, a2) -> list[str]:
     long_plan["locations"][0]["nameEn"] = "A very long and richly described old municipal office hall " * 3
     long_plan["locations"][0]["design"]["propsEn"] = [{"labelEn": f"tall carved wooden cabinet number {i}"} for i in range(6)]
     long_line = gm.setting_line(long_plan, OFFICE)
-    if len(long_line) > 300 or long_line.count(", ") < 4 or "afternoon" not in long_line or "from the left" not in long_line \
+    # 223 fix2: whole props are dropped before the place is shortened, so the overlong place may leave no props (3 commas, not 4)
+    if len(long_line) > 300 or long_line.count(", ") < 3 or "afternoon" not in long_line or "from the left" not in long_line \
             or not long_line.endswith(gm.SETTING_LINE_TAIL):
         bad.append(f"긴 데이터 배경 줄({len(long_line)}자): 다섯 조각 · 300자 · 꼬리 {long_line!r}")
     real = _setting_line_of(gm, _vibe(gm, a2, _plan(a2, OFFICE, PROD_LIGHTS, rich=True), real=True))
@@ -441,6 +443,61 @@ def _group_stored(gm, a2, lr, rt) -> list[str]:
     return bad
 
 
+# 223 fix2: fixture shaped like the prod dry run (outdoor railing by a convenience store, long main light, long props).
+FIX2_LOC = "Outdoors by a low metal railing"
+FIX2_LIGHT = "dim convenience store glass front light from behind the characters, cool color temperature"
+
+
+def _fix2_plan(a2) -> dict:
+    from src.vnew import locations as lm  # noqa: PLC0415
+
+    plan = _plan(a2, FIX2_LOC, (FIX2_LIGHT,) * 3)
+    plan["script"]["setting"].update({"enclosed": False, "timeKo": "낮"})
+    plan["locations"] = [{
+        "key": lm.normalize_name(FIX2_LOC), "nameEn": FIX2_LOC,
+        "design": {"enclosed": False, "floorEn": "light grey asphalt with painted parking lines",
+                   "lightEn": "Main light is the dim cool glow of the convenience store glass front behind the characters.",
+                   "propsEn": [{"labelEn": "Black U-shaped steel bollard with yellow reflective band (seat for two)"},
+                               {"labelEn": "Black U-shaped steel bollard with yellow band"}],
+                   "walls": {"north": {"featuresEn": "two parked white compact cars on the asphalt; a row of potted shrubs"},
+                             "east": {"featuresEn": "a tall green street lamp, a blue recycling bin"}}},
+        "facts": {"walls": {"north": {"wallColorEn": "white and blue; a full-width glass storefront with posters",
+                                      "objects": [{"kind": "compact cars", "colorEn": "White"}]},
+                            "east": {"wallColorEn": "light grey concrete", "objects": []}},
+                  "floorEn": "light grey asphalt"},
+    }]
+    return plan
+
+
+def _group_fix2(gm, a2) -> list[str]:
+    """223 fix2: every comma piece between the main light and "palette:" is a whole prop, never a clipped fragment."""
+    bad: list[str] = []
+    plan = _fix2_plan(a2)
+    parts = gm.setting_parts(plan, FIX2_LOC)
+    props = list(parts["props"])
+    if len(props) < 2:
+        bad.append(f"fixture props too few: {props!r}")
+    short = gm._setting_light(parts["main"], short=True)  # noqa: SLF001
+    lights = [x for x in (parts["light"], short, short[len("main light: "):]) if x]
+    for real in (False, True):
+        for form in gm.setting_forms(plan, FIX2_LOC, real=real):
+            body = form[len(gm.SETTING_LINE_HEAD) + 2:]
+            for tail in (gm.SETTING_LINE_TAIL, gm.SETTING_LINE_TAIL_SHORT):
+                body = body[:-len(tail)] if body.endswith(tail) else body
+            light = next((x for x in lights if x in body), "")
+            if not light or len(form) > gm.SETTING_LINE_MAX:
+                bad.append(f"form without main light or over {gm.SETTING_LINE_MAX}: {form!r}")
+                continue
+            rest = body[body.index(light) + len(light):].split("palette:")[0]
+            want = gm.setting_parts(plan, FIX2_LOC, real=real)["props"]
+            for piece in (p.strip() for p in rest.split(",")):
+                if not piece:
+                    continue
+                if piece not in want or any(p != piece and p.startswith(piece) for p in want):
+                    bad.append(f"clipped prop fragment {piece!r} (props {want!r}): {form!r}")
+    return bad
+
+
 def _run(fn, *args) -> list[str]:
     try:
         return fn(*args)
@@ -462,7 +519,8 @@ def check_bg_harmony_223() -> bool:
     gm._char_by_id = lambda owner, plan: {}  # noqa: SLF001 — 캐릭터 저장소 없이
     groups = {"b-a": lambda: _group_setting(gm, a2), "b-b": lambda: _group_budget(gm, a2), "b-c": lambda: _group_lights(gm, a2),
               "b-d": lambda: _group_harmony(gm, a2, lr, rt), "b-e": lambda: _group_view(lm), "b-f": lambda: _group_lead(gm, a2),
-              "b-g": lambda: _group_222(gm, a2), "b-h": lambda: _group_no_text(gm, a2), "b-i": lambda: _group_stored(gm, a2, lr, rt)}
+              "b-g": lambda: _group_222(gm, a2), "b-h": lambda: _group_no_text(gm, a2), "b-i": lambda: _group_stored(gm, a2, lr, rt),
+              "b-l": lambda: _group_fix2(gm, a2)}
     results: dict[str, list[str]] = {}
     caught: list[str] = []
     try:
@@ -476,6 +534,8 @@ def check_bg_harmony_223() -> bool:
             "noFit": ("b-b", {"setting_room": lambda *_a, **_k: 10 ** 6}),
             "storedLight": ("b-g", {"shot_light": lambda plan, cut, main=None: str((cut or {}).get("lightEn") or "")}),
             "trimNoText": ("b-h", {"NO_TEXT_SENTENCE": "\u0000"}),
+            # 223 fix2: per-prop clipping (the old fit step) must be caught
+            "clipProps": ("b-l", {"_setting_text": lambda parts, props, *rest, _o=gm._setting_text: _o(parts, [" ".join(p.split()[:2]) for p in props], *rest)}),
         }
         for mname, (group, attrs) in mutants.items():
             saved = {k: getattr(gm, k) for k in attrs}
