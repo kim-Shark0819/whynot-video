@@ -469,6 +469,10 @@ VNEW_CONTENT_FALLBACK_MODEL = os.getenv("VNEW_CONTENT_FALLBACK_MODEL", "bytedanc
 # 작업 156: 실사 테이크(start_real·autoReal·실사 다시 시도·인물 바꾸기) 모델(fal endpoint). 애니 테이크 모델(input.videoModel)과 따로다.
 # 금액·realRun.endpoint·참고 영상 상한(152 조각)도 이 모델 기준. 빈 값이거나 fal 등록표에 테이크 모델(videoListField)로 없으면 애니 모델 그대로.
 VNEW_REAL_TAKE_MODEL = os.getenv("VNEW_REAL_TAKE_MODEL", "bytedance/seedance-2.5/reference-to-video").strip()
+# 작업 228: 애니(웹툰) 테이크가 likeness(실존 인물 닮음)로 거절되면 그 테이크 전체를 이 모델(fal endpoint)로 조각 1부터 1번 다시 낸다.
+# test4(11-12): Seedance 2.5 가 그린 웹툰 인물 시트를 실존 인물로 보고 모든 애니 테이크를 거절했고 Wan 3.0 은 같은 그림을 받았다.
+# 빈 값이면 끔. fal 등록표에 previzCapable 테이크 모델(videoListField)이 아니면 경고 1줄 + 끔. 코드 기본, 템플릿에 넣지 않는다.
+VNEW_ANIME_LIKENESS_FALLBACK_MODEL = os.getenv("VNEW_ANIME_LIKENESS_FALLBACK_MODEL", "alibaba/wan-3.0/reference-to-video").strip()
 # 작업 156: 테이크·조각 결과마다 화면 글자(자막·캡션) 검사 — 25·50·75% 프레임 3장을 vision 1번(charge_text). 글자가 있으면 대사를
 # "audio only" 로 적은 프롬프트로 1번 다시 만들고 글자 프레임이 적은 쪽을 쓴다. 끄면 vision 호출 0(멈춘 화면 검사는 그대로).
 VNEW_TEXT_CHECK = _bool("VNEW_TEXT_CHECK", True)

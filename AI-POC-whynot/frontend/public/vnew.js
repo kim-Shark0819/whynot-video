@@ -8428,6 +8428,7 @@
     var fallbackLine = variant.key === "real" ? realFallbackText(v, unit) : ""; // 작업 130: likeness 단계 문구
     if (fallbackLine) cell.appendChild(el("p", "vnew-hint vnew-real-fallback", fallbackLine));
     if (v.contentFallback) cell.appendChild(el("p", "vnew-hint vnew-content-fallback", "콘텐츠 검사로 Seedance 로 만들었습니다")); // 작업 153
+    if (v.animeFallback && v.animeFallback.text) cell.appendChild(el("p", "vnew-hint vnew-anime-fallback", v.animeFallback.text)); // 작업 228
     if (variant.key === "real") {
       realCutQaLines(v).forEach(function (line) { cell.appendChild(el("p", "vnew-hint vnew-real-cut-qa", line)); }); // 작업 133
     }

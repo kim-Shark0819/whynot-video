@@ -8115,7 +8115,14 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             if not any(p.get("status") == "submitted" for p in parts):
                 _escalate_likeness_parts(owner, pid, gen_id, index, claim)
             return
-        if all(p.get("failureKind") == CONTENT_FLAG_KIND for p in failed):
+        if _likeness_rejected(error) and _anime_fallback_target(gen, index, variant):
+            # 작업 228: 애니 조각 likeness 거절 → 아직 도는 조각을 기다렸다가(이중 제출 없음) 테이크 전체를 대체 모델로 조각 1부터.
+            if any(p.get("status") == "submitted" for p in parts):
+                return
+            if _anime_likeness_fallback(owner, pid, gen_id, index, variant, claim, error, part=failed[0]):
+                return
+        anime_fb = _anime_fallback_of(_previz_cells(gen)[index][variant])  # 작업 228: 대체 테이크 실패는 단계 없이 지금 문구로
+        if not anime_fb and all(p.get("failureKind") == CONTENT_FLAG_KIND for p in failed):
             # 작업 153: 콘텐츠 검사 거절만 있으면 아직 도는 조각을 기다렸다가(이중 제출 없음) 거절된 조각만 다음 단계로.
             if not any(p.get("status") == "submitted" for p in parts):
                 _escalate_content_parts(owner, pid, gen_id, index, variant, claim)
@@ -9166,7 +9173,8 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if not rec_keys:
             raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
 
-        endpoint = _real_take_model(gen) if real else str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        # 작업 228: 애니 칸에 대체 기록(animeFallback)이 있으면 그 모델로 낸다(없으면 gen.videoModel 그대로).
+        endpoint = _real_take_model(gen) if real else _anime_take_model(gen, state)
         caps = _previz_caps(endpoint)
         resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
 
@@ -9184,8 +9192,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             step = _fallback_step(state) if real else 0  # 작업 130: likeness 1단계면 인물당 정면 1장
             content_step = _content_step(state)  # 작업 153: 1 = 순화(같은 모델), 2 = 순화 + Seedance, 163: 3 = 더 센 순화
             continuity = None
-            if content_step >= 2 and _content_fallback_model(endpoint):
+            if content_step >= 2 and _content_fallback_model(endpoint) and not _anime_fallback_of(state):
                 # 작업 155: Seedance 대체 = 같은 장소 1장(맨 끝)·의상 고정·원래 모델과 같은 신원 참고·앞 테이크 마지막 프레임(있을 때).
+                # 작업 228: 애니 대체 테이크는 순화 단계만 쓰고 모델은 바꾸지 않는다(한 테이크 한 모델).
                 frame, frame_key = (None, "") if content_step >= CONTENT_STEP_DROP_REFS else _prev_take_frame(plan, index, variant)
                 continuity = {"take": take, "frame": frame, "frameKey": frame_key, "origFrame": False,
                               "origMax": int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)}
@@ -9537,6 +9546,13 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
             # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
             kind = str(poll_result.get("failureKind") or "") or _audio_kind(message)
+            if gen.get("mode") == "previz-take" and _likeness_rejected(message) \
+                    and _anime_likeness_fallback(owner, pid, gen_id, index, variant, claim, message):
+                return  # 작업 228: 애니 테이크 likeness 거절 → 테이크 전체를 대체 모델(Wan 3.0)로 1번
+            if _anime_fallback_of(state):
+                # 작업 228: 대체 모델로 낸 테이크도 실패(어떤 이유든) → 단계 없이 지금 문구로 실패.
+                _fail_variant(owner, pid, gen_id, index, variant, claim, message, kind=kind)
+                return
             if not kind and gen.get("mode") == "previz" and _prompt_size_cap(message) and not state.get("sizeRetry"):
                 # 작업 167: fal 프롬프트 크기 거절 → 더 짧은 예산으로 같은 칸을 1번 다시 낸다(두 번째 거절은 아래 그대로 실패).
                 _size_requeue(owner, pid, gen_id, index, variant, claim, _prompt_size_cap(message), message=message)
@@ -10599,6 +10615,116 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
         if box.get("step") == 1 and not kling:
             message += REAL_FALLBACK_NO_KLING
         _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind="likeness")
+
+
+# ---------------------------------------------------------------- 작업 228: 애니(웹툰) 테이크 likeness 거절 → 대체 모델 1번
+#
+# test4(11-12): Seedance 2.5 r2v 가 그린 웹툰 인물 시트·정면을 실존 인물로 보고 애니 테이크를 모두 거절했다(422 partner_validation_failed).
+# 애니 칸(webtoon)이 likeness 로 거절되면(통 테이크·조각) 테이크 전체를 VNEW_ANIME_LIKENESS_FALLBACK_MODEL(기본 Wan 3.0 r2v)로 조각 1부터
+# 다시 낸다 — 한 테이크 안에서 모델을 섞지 않는다(끝난 조각도 버린다). 칸 state.animeFallback {from, to, at} 이 그 1번의 기록이고, 있으면
+# 제출이 그 모델로 내며(_anime_take_model) 그 테이크가 또 실패하면(어떤 이유든) 단계 없이 지금 문구로 실패한다. 대체 모델의 최대 길이·
+# 참고 영상 상한(video_options)에 테이크(그 모델로 나눈 조각)가 맞지 않으면 대체하지 않고 이유를 로그에 남긴다. 실사 칸·실사 사다리·
+# 다른 거절 종류·gen.videoModel·input.videoModel·견적은 그대로. 원장은 제출 경로(_charge_take)가 대체 모델 금액으로 남긴다.
+
+ANIME_FALLBACK_TEXT = "Seedance가 인물 그림을 실존 인물로 오인해 거절해서, 이 테이크는 Wan 3.0으로 다시 만들었습니다."
+
+
+def _anime_likeness_fallback_model() -> str:
+    """대체 모델 endpoint. 빈 값이면 ""(끔). fal 등록표의 previzCapable 테이크 모델(videoListField)이 아니면 경고 1줄 + ""."""
+    endpoint = _endpoint_of(vnew_settings.VNEW_ANIME_LIKENESS_FALLBACK_MODEL)
+    if not endpoint:
+        return ""
+    caps = _previz_caps(endpoint)
+    if not caps.get("previzCapable") or not caps.get("videoListField") or caps.get("available") is False:
+        log.warning("vnew.gen.anime_likeness_fallback_invalid model=%s", endpoint)
+        return ""
+    return endpoint
+
+
+def _anime_fallback_of(state) -> dict:
+    """칸의 대체 기록(animeFallback). 없으면 {}."""
+    fallback = state.get("animeFallback") if isinstance(state, dict) else None
+    return fallback if isinstance(fallback, dict) and fallback.get("to") else {}
+
+
+def _anime_take_model(gen: dict, state: dict | None = None) -> str:
+    """애니 테이크 칸을 낼 모델: 대체 기록이 있으면 그 모델, 없으면 gen.videoModel(지금 그대로)."""
+    return str(_anime_fallback_of(state).get("to") or gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+
+
+def _anime_fallback_target(gen: dict, index: int, variant: str) -> str:
+    """대체할 모델 endpoint. 애니 통 테이크 칸이 아니거나 · 끔 · 이미 1번 했거나 · 프로젝트 모델이 그 모델이면 ""."""
+    if variant != "webtoon" or gen.get("mode") != "previz-take":
+        return ""
+    state = _previz_cells(gen)[index].get(variant) or {}
+    if _anime_fallback_of(state):  # 한 테이크에 1번
+        return ""
+    fallback = _anime_likeness_fallback_model()
+    if not fallback or _endpoint_of(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL) == fallback:
+        return ""
+    return fallback
+
+
+def _anime_fallback_misfit(plan: dict, take: dict, endpoint: str) -> str:
+    """대체 모델 상한에 맞지 않는 이유(맞으면 ""). 그 모델로 나눈 조각(없으면 테이크 전체) 중 가장 긴 것을 최대 길이·참고 영상 상한과 본다."""
+    try:
+        options = vpoc_ark.video_options(vpoc_settings.FAL_ID_PREFIX + endpoint)
+        parts = _take_parts_for(plan, take, endpoint)
+    except VpocError as exc:
+        return f"split={exc.kind}"
+    except Exception as exc:  # noqa: BLE001
+        return f"options={type(exc).__name__}"
+    longest = max([float(p.get("seconds") or 0) for p in parts] or [float(take.get("seconds") or 0)])
+    max_s = float(options.get("maxDurationS") or 0)
+    ref_s = float(options.get("maxRefVideoS") or 0) if options.get("videoInput") else 0.0
+    if max_s > 0 and longest > max_s + TAKE_PART_TOL_S:
+        return f"duration={longest:.1f}>{max_s:g}"
+    if ref_s > 0 and longest > ref_s + TAKE_PART_TOL_S:
+        return f"refVideo={longest:.1f}>{ref_s:g}"
+    return ""
+
+
+def _anime_likeness_fallback(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str,
+                             part: dict | None = None) -> bool:
+    """애니 칸 likeness 거절 → 테이크 전체를 대체 모델로 queued(조각 기록을 지워 조각 1부터). 했으면 True, 아니면 False(지금처럼 실패).
+
+    모델 노트 1줄(거절된 시도 머리, kind likeness, action fallbackModel:<대체 모델>)."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if not _claim_ok_variant(gen, index, variant, claim):
+        return False
+    fallback = _anime_fallback_target(gen, index, variant)
+    if not fallback:
+        return False
+    take = _previz_cells(gen)[index]
+    original = _endpoint_of(_anime_take_model(gen, take.get(variant)))
+    misfit = _anime_fallback_misfit(plan, take, fallback)
+    if misfit:
+        log.info("vnew.gen.anime_likeness_fallback_skip pid=%s take=%d to=%s reason=%s", pid, index, fallback, misfit)
+        return False
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        box["head"] = _note_head(g, index, variant, part=part)  # 거절된 시도의 머리(상태를 바꾸기 전)
+        state = _previz_cells(g)[index][variant]
+        state.update(status="queued", invocationArn="", outputPrefix="", outputKey="", error="", claim="", claimedAt="")
+        for key in ("parts", "failureKind", "pendingCharge", "contentFallback", "qc", "sizeRetry"):
+            state.pop(key, None)
+        if state.get("note") == TEXT_LEFT_NOTE:
+            state.pop("note", None)
+        state["animeFallback"] = {"from": original, "to": fallback, "at": now_iso()}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return False
+    log.info("vnew.gen.anime_likeness_fallback pid=%s take=%d from=%s to=%s", pid, index, original, fallback)
+    vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": message, "kind": "likeness",
+                                                 "action": vnew_model_notes.ACTION_FALLBACK + fallback})
+    return True
 
 
 # ---------------------------------------------------------------- 작업 169: 152 조각 실사 테이크의 조각 단위 likeness 사다리
@@ -15136,6 +15262,11 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         if isinstance(content_fb, dict) and content_fb.get("to"):
             # 작업 153: 콘텐츠 검사로 Seedance 로 만든 칸(화면 한 줄). 없으면 키 없음(옛 보기와 같다).
             out["contentFallback"] = {"from": str(content_fb.get("from") or ""), "to": str(content_fb.get("to") or "")}
+        anime_fb = _anime_fallback_of(state)
+        if anime_fb:
+            # 작업 228: likeness 거절로 대체 모델로 다시 만든 애니 테이크(화면 한 줄). 없으면 키 없음(옛 보기와 같다).
+            out["animeFallback"] = {"from": str(anime_fb.get("from") or ""), "to": str(anime_fb.get("to") or ""),
+                                    "at": str(anime_fb.get("at") or ""), "text": ANIME_FALLBACK_TEXT}
         fallback = state.get("fallback")
         if isinstance(fallback, dict) and fallback.get("step"):
             # 작업 130: likeness 단계(⑤ 실사 행 문구). 컷 단위는 끝난 컷 수 / 전체 컷 수. 없으면 키 없음(옛 보기와 같다).
@@ -15643,6 +15774,8 @@ def _note_cell_model(gen: dict, state: dict, variant: str) -> str:
     anime = _endpoint_of(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
     if gen.get("mode") != "previz-take":
         return anime
+    if variant == "webtoon" and _anime_fallback_of(state):
+        return _endpoint_of(_anime_fallback_of(state)["to"])  # 작업 228: 대체 모델로 낸 애니 테이크
     fallback = state.get("fallback") if isinstance(state.get("fallback"), dict) else {}
     if variant == "real" and fallback.get("model"):
         return _endpoint_of(fallback["model"])

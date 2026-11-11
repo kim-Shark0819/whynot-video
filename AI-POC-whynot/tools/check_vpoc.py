@@ -68906,6 +68906,7 @@ def main() -> int:
     if not __import__("check_long_json_225").check_long_json_225(): fail("작업 225: 긴 JSON 호출 출력 예산(VNEW_LONG_JSON_MAX_TOKENS) 검사 실패")
     if not __import__("check_outdoor_location_226").check_outdoor_location_226(): fail("작업 226: 실외 장소(enclosed false) 열린 바깥 지시문 검사 실패")
     if not __import__("check_outdoor_verify_227").check_outdoor_verify_227(): fail("작업 227: 실외 장소 verify · 다시 그리기 검사 실패")
+    if not __import__("check_anime_likeness_228").check_anime_likeness_228(): fail("작업 228: 애니 테이크 likeness 거절 → Wan 3.0 1번 대체 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
