@@ -68908,6 +68908,7 @@ def main() -> int:
     if not __import__("check_outdoor_verify_227").check_outdoor_verify_227(): fail("작업 227: 실외 장소 verify · 다시 그리기 검사 실패")
     if not __import__("check_anime_likeness_228").check_anime_likeness_228(): fail("작업 228: 애니 테이크 likeness 거절 → Wan 3.0 1번 대체 검사 실패")
     if not __import__("check_anime_kling_229").check_anime_kling_229(): fail("작업 229: 애니 테이크 조각 모든 모델 거절 → Kling O3 컷 단위 검사 실패")
+    if not __import__("check_real_tod_230").check_real_tod_230(): fail("작업 230: 실사 시간대 부정 낱말 · 우선순위 · 죽은 Seedance 건너뛰기 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

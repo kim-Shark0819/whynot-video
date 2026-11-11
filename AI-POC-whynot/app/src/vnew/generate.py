@@ -7927,6 +7927,19 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                         waiting[field] = old[field]
                 records.append(waiting)
                 continue
+            if real and _part_fresh(old) and _real_likeness_skip(plan.get("gen") or {}):
+                # 작업 230: 이 회차에서 Seedance 가 likeness 로 죽었다 — 새 조각은 사다리 없이 그 컷들을 바로 컷 단위 Kling 으로.
+                kling = _kling_cut_model()
+                items = _kling_part_items(plan, take, part) if kling else []
+                if items:
+                    _mark_seedance_skipped(owner, pid, gen_id, index, part, kling[0])
+                    records.append({**part, "sig": sig, "status": PART_SUPERSEDED, "replacedBy": KLING_CUTS_REPLACED,
+                                    "likenessStep": 2, "klingModel": kling[0], "seedanceSkipped": True, "invocationArn": "",
+                                    "outputPrefix": "", "outputKey": "", "error": ""})
+                    parts[at:at] = items
+                    log.info("vnew.gen.take_part_skip pid=%s take=%s part=%d/%d cuts=%d variant=real kling=1", pid, take_id,
+                             int(part.get("no") or 0), len(parts), len(items))
+                    continue
             sub = _part_take(plan, take, part)
             # 작업 153: 콘텐츠 검사로 거절된 조각은 기록된 단계로(1 = 순화, 2 = 순화 + Seedance). 0 이면 지금 그대로.
             content_step = _content_step(old) if old else 0
@@ -8122,6 +8135,11 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             for number, change in updates.items():
                 if number < len(stored):
                     stored[number].update(change)
+            run = g.get("realRun")
+            if variant == "real" and isinstance(run, dict) and run.get("likenessKling") and any(
+                    change.get("status") == "completed" and parts[number].get("kind") != "kling"
+                    for number, change in updates.items()):
+                run["likenessKling"] = 0  # 작업 230: Seedance 조각이 끝났다 — 건너뛰기 셈을 처음부터
 
         _commit(owner, pid, mutator)
         for number, change in updates.items():
@@ -9804,21 +9822,58 @@ REAL_STILL_TOD_FIX = {"day": "make it bright daytime with a blue sky, no dusk, n
 
 
 def _real_tod(plan: dict) -> str:
-    """작업 160/161: 실사 시간대 "day"|"night". 콘티(setting·컷 lightEn/locationEn)·대본 setting.timeKo·장소 빛 가운데 밤 낱말이
-    있으면 "night", 아니면 "day"(같은 plan 이면 언제나 같은 값)."""
+    """작업 160/161: 실사 시간대 "day"|"night"(같은 plan 이면 언제나 같은 값).
+
+    작업 230: test4 장소 빛 "… it is daytime, never evening or night." 가 밤이 됐다. 부정된 낱말(no · not · never · without ·
+    non- · rather than, 한국어 아닌 · 없는)은 세지 않는다. 층 순서 = 대본 setting.timeKo → 콘티 setting → 컷(lightEn · locationEn ·
+    timeKo) → 장소 빛(design.lightEn). 앞 층이 정해지면 뒤 층은 보지 않는다. 한 층 안에서는 낮 낱말이 있으면 낮, 낮 낱말 없이
+    부정되지 않은 밤 낱말이 있으면 밤, 둘 다 없으면 다음 층. 모든 층이 비면 낮."""
     conti = plan.get("conti") or {}
     setting = (plan.get("script") or {}).get("setting") or {}
-    texts = [str(v) for v in (conti.get("setting") or {}).values() if isinstance(v, str)] if isinstance(
-        conti.get("setting"), dict) else []
-    texts.append(_time_of_day_en(setting.get("timeKo") or ""))
-    texts.append(str(setting.get("timeKo") or ""))
-    for cut in conti.get("cuts") or []:
-        if isinstance(cut, dict):
-            texts += [str(cut.get("lightEn") or ""), str(cut.get("locationEn") or ""), str(cut.get("timeKo") or "")]
-    for loc in plan.get("locations") or []:
-        if isinstance(loc, dict):
-            texts.append(str(((loc.get("design") or {}) if isinstance(loc.get("design"), dict) else {}).get("lightEn") or ""))
-    return "night" if any(_NIGHT_WORDS.search(t) for t in texts if t) else "day"
+    setting = setting if isinstance(setting, dict) else {}
+    levels: list[list[str]] = [[str(setting.get("timeKo") or "")]]
+    levels.append([str(v) for v in conti["setting"].values() if isinstance(v, str)]
+                  if isinstance(conti.get("setting"), dict) else [])
+    levels.append([str(cut.get(k) or "") for cut in conti.get("cuts") or [] if isinstance(cut, dict)
+                   for k in ("lightEn", "locationEn", "timeKo")])
+    levels.append([str(((loc.get("design") or {}) if isinstance(loc.get("design"), dict) else {}).get("lightEn") or "")
+                   for loc in plan.get("locations") or [] if isinstance(loc, dict)])
+    for texts in levels:
+        found = _tod_level(texts)
+        if found:
+            return found
+    return "day"
+
+
+# 작업 230: _real_tod 낱말. 낮 = day · daytime · daylight · morning · afternoon · 낮(낮은 · 낮게 · 낮아 · 낮추 = 높이 뺌) · 아침 · 오후.
+# 밤 = _NIGHT_WORDS 와 같은 영어 + 밤 · 새벽 · 심야 · 자정. 부정 = 같은 마디(쉼표 · 마침표 …)에서 앞 3낱말 안의 부정어, 한국어는 뒤의 아닌 · 없는.
+_TOD_DAY = re.compile(r"\b(?:day|day-?time|daylight|morning|afternoon|midday)\b|낮(?![은게아추])|아침|오전|오후|정오",
+                      re.IGNORECASE)
+_TOD_NIGHT = re.compile(r"\b(?:night|night-?time|midnight)\b|밤|새벽|심야|자정", re.IGNORECASE)
+_TOD_NEG_EN = re.compile(r"\b(?:no|not|never|without|nor|non|rather\s+than|instead\s+of)\b|n't\b", re.IGNORECASE)
+_TOD_NEG_KO = re.compile(r"^\s*(?:이|가|은|는|도)?\s*(?:아닌|아니|없는|없이|말고)")
+_TOD_CLAUSE = re.compile(r"[.;,:!?\n()\u2026]+|\s[-\u2013\u2014]+\s")
+_TOD_NEG_GAP = 3  # 부정어와 낱말 사이 낱말 수 상한("never evening or night" = 2)
+
+
+def _tod_negated(clause: str, start: int, end: int) -> bool:
+    """작업 230: clause[start:end] 낱말이 부정됐나. 영어 = 앞의 부정어(사이 낱말 _TOD_NEG_GAP 이하), 한국어 = 뒤의 아닌 · 없는."""
+    if _TOD_NEG_KO.match(clause[end:]):
+        return True
+    last = None
+    for last in _TOD_NEG_EN.finditer(clause[:start]):
+        pass
+    return last is not None and len(re.findall(r"[\w'-]+", clause[last.end():start])) <= _TOD_NEG_GAP
+
+
+def _tod_level(texts: list[str]) -> str:
+    """작업 230: 한 층의 글들 → "day" | "night" | ""(정해지지 않음). 낮 낱말 > 부정되지 않은 밤 낱말."""
+    day = night = False
+    for text in texts:
+        for clause in _TOD_CLAUSE.split(text or ""):
+            day = day or any(not _tod_negated(clause, m.start(), m.end()) for m in _TOD_DAY.finditer(clause))
+            night = night or any(not _tod_negated(clause, m.start(), m.end()) for m in _TOD_NIGHT.finditer(clause))
+    return "day" if day else "night" if night else ""
 
 
 def _real_time_sentence(plan: dict) -> str:
@@ -10993,6 +11048,56 @@ PART_SUPERSEDED = "superseded"
 KLING_CUTS_REPLACED = "kling-cuts"
 REAL_PART_FALLBACK_TRIED = ("Seedance", "Seedance 다시", "Seedance 정면 1장", "Seedance 정면 다시", "Seedance 정면 + 앞 결과 프레임",
                             "컷 단위 Kling")
+# 작업 230: test4(11-12) Seedance 2.5 가 실사 조각을 거의 모두 likeness 로 거절했고, 조각마다 사다리(0b · 1 · 1r · 1b …)가 거절 호출을
+# 15~20번 낸 뒤에야 컷 단위 Kling 으로 갔다(테이크 하나 약 60분). 한 gen 의 실사 회차(realRun)에서 Seedance likeness 거절로 Kling 까지 간
+# 조각이 이만큼 이어지면 그 회차의 새 조각은 바로 컷 단위 Kling 에서 시작한다(realRun.seedanceSkipped · 모델 노트). Seedance 조각이
+# 하나 끝나면 셈(realRun.likenessKling)은 0. 0 = 끔(지금 사다리). 코드 기본, 설정 파일 · 템플릿에 넣지 않는다. 애니는 그대로(228/229).
+VNEW_REAL_LIKENESS_SKIP_AFTER = 2
+REAL_SKIP_NOTE = ("Seedance refused {n} pieces in a row for likeness; skip Seedance for new pieces of this run and start at "
+                  "Kling per cut.")
+
+
+def _real_likeness_skip(gen: dict) -> bool:
+    """작업 230: 이 실사 회차의 새 조각을 Seedance 없이 컷 단위 Kling 에서 시작하나(셈 ≥ VNEW_REAL_LIKENESS_SKIP_AFTER > 0)."""
+    after = int(VNEW_REAL_LIKENESS_SKIP_AFTER or 0)
+    run = (gen or {}).get("realRun") if isinstance(gen, dict) else None
+    if after <= 0 or not isinstance(run, dict):
+        return False
+    try:
+        return int(run.get("likenessKling") or 0) >= after
+    except (TypeError, ValueError):
+        return False
+
+
+def _part_fresh(old) -> bool:
+    """작업 230: 아직 한 번도 내지 않은 조각(기록 없음 · 또는 기다리던 pending 이고 콘텐츠 · likeness · 검사 단계가 없다)."""
+    if not old:
+        return True
+    return old.get("status") == "pending" and not any(
+        field in old for field in ("contentStep", "contentFallback", "qc") + LIKENESS_PART_FIELDS)
+
+
+def _mark_seedance_skipped(owner: str, pid: str, gen_id: str, index: int, part: dict, kling_model: str) -> None:
+    """작업 230: 처음 건너뛸 때 1번 — realRun.seedanceSkipped = {at, after} + 모델 노트(fallbackModel:<Kling>)."""
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        run = g.get("realRun")
+        if not isinstance(run, dict) or run.get("seedanceSkipped"):
+            raise _Discard()
+        run["seedanceSkipped"] = {"at": now_iso(), "after": int(VNEW_REAL_LIKENESS_SKIP_AFTER)}
+        box["head"] = _note_head(g, index, "real", part=part)
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    log.info("vnew.gen.likeness_skip pid=%s gen=%s take=%s part=%s after=%d", pid, gen_id, index, part.get("no"),
+             int(VNEW_REAL_LIKENESS_SKIP_AFTER))
+    vnew_model_notes.record(owner, pid, gen_id, {**box.get("head", {}), "kind": "likeness",
+                                                 "providerMessage": REAL_SKIP_NOTE.format(n=int(VNEW_REAL_LIKENESS_SKIP_AFTER)),
+                                                 "action": vnew_model_notes.ACTION_FALLBACK + str(kling_model)})
 # 작업 176: 1b 프레임 이름표(겉모습 참고만 · 같은 샷이면 이어 가기). 1b 조각에만 쓴다(다른 프롬프트는 그대로).
 REAL_LIKENESS_FRAME_LOOK = ("@Image{no} is an earlier shot of this same scene, for identity and look reference only (same faces, "
                             "hair, outfits, background and light). Shot 1 is a new framing; do not start on this image or keep "
@@ -11244,6 +11349,8 @@ def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, clai
                 origin = next((p for p in state.get("parts") or [] if isinstance(p, dict) and p.get("kind") != "kling"
                                and p.get("no") == part.get("fromPart") and p.get("replacedBy") == KLING_CUTS_REPLACED), {})
                 tried = _likeness_tried(origin, kling=True)
+                if origin.get("seedanceSkipped"):
+                    tried = [REAL_PART_FALLBACK_TRIED[-1]]  # 작업 230: Seedance 를 건너뛴 조각 — 시도한 단계는 Kling 뿐
                 nxt = None
             elif step == 0 and retry < LIKENESS_PART_RETRIES:
                 nxt = (0, retry + 1)
@@ -11286,6 +11393,11 @@ def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, clai
             if step == 2:
                 part["klingModel"] = kling[0]
             box["moves"].append((part.get("no"), "0b" if step == 0 else str(step), retry, extra))
+        run = g.get("realRun")
+        reached = sum(1 for _part, (step, _retry), _extra, _look in moves if step == 2)
+        if reached and int(VNEW_REAL_LIKENESS_SKIP_AFTER or 0) > 0 and isinstance(run, dict):
+            # 작업 230: Seedance likeness 거절로 컷 단위 Kling 까지 간 조각 수(이어진 것만 — Seedance 조각이 끝나면 0)
+            run["likenessKling"] = int(run.get("likenessKling") or 0) + reached
         state.pop("pendingCharge", None)
         state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
 
