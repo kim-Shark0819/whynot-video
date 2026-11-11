@@ -2606,16 +2606,107 @@ _VERIFY_TOOL = {
     },
 }
 
+# 작업 227: 실외(enclosed false) verify 글. 방 · 벽 · 천장 낱말은 OUTDOOR_OPEN_AIR 부정 문장에만 있다.
+# backQuad/frontQuad 는 cut(_faces_from_corners)이 쓰는 같은 두 사각형 — 가이드 가운데 사각형 · 바깥 테두리.
+_VERIFY_SYSTEM_OUTDOOR = (
+    "You check a generated fixed-camera view of an open-air outdoor place against a layout guide and reference "
+    "webtoon panels. " + OUTDOOR_OPEN_AIR + " Answer ONLY by calling emit_verify exactly once. "
+    "matchesPlace = true if the generated view shows the same open-air place as the panels: the same main objects "
+    "(listed in the request), the same time of day and light, open sky overhead, and nothing that encloses the place. "
+    "backQuad = the four corner points of the MAIN BACKGROUND region in the generated image (the center rectangle of "
+    "the layout guide: what is straight behind the characters, between the left side and right side surroundings, "
+    "above the ground), frontQuad = the four corners of the full frame opening (the outer rectangle of the layout "
+    "guide, where the left side, right side, ground and sky areas end), each as normalized [x,y] in 0..1, ordered "
+    "top-left, top-right, bottom-right, bottom-left. If you cannot find these corners, leave backQuad and frontQuad out. "
+    "matchesSides = true only for the front view, when its left side and right side surroundings show the same "
+    "surroundings and objects as the left and right sides of the back view (pass true for the back view). "
+    "If matchesPlace or matchesSides is false, give fixesEn: a short list of concrete English corrections an image "
+    "model can follow, each naming only outdoor objects, ground, sky, surroundings or light of this open-air place, "
+    "keeping the given time of day."
+)
+_VERIFY_TOOL_OUTDOOR = {
+    **_VERIFY_TOOL,
+    "description": "Report place/side match and the main-background and full-frame corner points of the view.",
+}
+# 작업 227: 실외 fixesEn 에서 버릴 문장(방 · 벽 · 천장 · 상자 · 실내 가구). 가구 낱말은 이 장소 사실 · 설계 물건에 있으면 둔다.
+_OUTDOOR_FIX_STRUCTURE_RE = re.compile(
+    r"\b(?:rooms?|walls?|ceilings?|interiors?|indoors?|box(?:es)?|cutaway)\b", re.IGNORECASE)
+_OUTDOOR_FIX_FURNITURE_RE = re.compile(
+    r"\b(?:desks?|chairs?|beds?|sofas?|couch(?:es)?|shel(?:f|ves)|bookshel(?:f|ves)|cabinets?|wardrobes?|"
+    r"window[- ]?frames?)\b", re.IGNORECASE)
+_FIX_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+")
+VERIFY_OBJECTS_MAX_CHARS = 600
 
-def _verify(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+
+def _singular(word: str) -> str:
+    word = word.replace("-", " ")
+    irregular = {"shelves": "shelf", "bookshelves": "bookshelf", "couches": "couch"}
+    return irregular.get(word, word[:-1] if word.endswith("s") else word)
+
+def _outdoor_objects(loc: dict) -> list[str]:
+    """작업 227: 실외 장소의 주요 물건(사실 면별 물건 → 설계 propsEn → 사실 물건이 없으면 설계 featuresEn). 중복 없이."""
+    design = loc.get("design") or {}
+    facts = loc.get("facts") or {}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(text: str) -> None:
+        text = " ".join(_strip_no_structure(text).split())
+        if text and text.lower() not in seen and text.lower().replace("-", " ") != "open air":
+            seen.add(text.lower())
+            out.append(text)
+
+    for side in SIDES:
+        for obj in ((facts.get("walls") or {}).get(side) or {}).get("objects") or []:
+            kind = str(obj.get("kind") or "").strip()
+            if kind:
+                _add(f"{str(obj.get('colorEn') or '').strip()} {kind}")
+    for prop in design.get("propsEn") or []:
+        if isinstance(prop, dict):
+            _add(str(prop.get("labelEn") or ""))
+    if not out:
+        for side in SIDES:
+            wall = (design.get("walls") or {}).get(side)
+            if isinstance(wall, dict):
+                _add(str(wall.get("featuresEn") or ""))
+    return out
+
+
+def _outdoor_fixes(fixes: list[str], loc: dict) -> list[str]:
+    """작업 227: 실외 fixesEn 에서 방 · 벽 · 천장 · 실내 가구를 묻는 문장, 낮이면 밤 문장을 버린다. 남은 문장은 _day_guard.
+
+    가구 낱말(desk · chair · shelf …)은 이 장소 물건 목록에 같은 낱말이 있으면 둔다(가게 앞 의자 · 유리 너머 진열대).
+    """
+    own = " ".join(_outdoor_objects(loc)).lower()
+    daytime = _outdoor_daytime(loc)
+    kept: list[str] = []
+    for fix in fixes:
+        sentences: list[str] = []
+        for sentence in _FIX_SENTENCE_SPLIT_RE.split(str(fix or "").strip()):
+            if not sentence.strip():
+                continue
+            if _OUTDOOR_FIX_STRUCTURE_RE.search(sentence):
+                continue
+            furniture = [m.group(0).lower() for m in _OUTDOOR_FIX_FURNITURE_RE.finditer(sentence)]
+            if any(_singular(word) not in own for word in furniture):
+                continue
+            if daytime and _NIGHT_LIGHT_RE.search(sentence):
+                continue
+            sentences.append(_day_guard(sentence.strip(), loc))
+        if sentences:
+            kept.append(" ".join(sentences))
+    return kept
+
+
+def _verify(blocks: list[dict], *, model: str, system_text: str | None = None, tool: dict | None = None) -> tuple[dict, dict]:
     """llm._converse 로 뷰 검증 {matchesPlace, matchesSides, backQuad, frontQuad, fixesEn} 를 받는다.
 
-    검사가 바꿔 끼운다.
+    검사가 바꿔 끼운다. 작업 227: 실외는 system_text · tool 을 넘긴다(실내는 넘기지 않는다 — 227 전 그대로).
     """
     return vpoc_llm._converse(  # noqa: SLF001
-        system_text=_VERIFY_SYSTEM,
+        system_text=system_text or _VERIFY_SYSTEM,
         blocks=blocks,
-        tool=_VERIFY_TOOL,
+        tool=tool or _VERIFY_TOOL,
         max_tokens=VERIFY_MAX_TOKENS,
         where="vnew.location.verify",
         model=VERIFY_MODEL,
@@ -2643,10 +2734,17 @@ def _verify_views(
       backQuad/frontQuad 는 cut 이 쓸 '최종' 꼭짓점(정규화). method 는 'guide' | 'claude'.
     """
     checks: dict[str, dict[str, dict]] = {v: {} for v in VARIANTS}
+    outdoor = _is_outdoor(loc)  # 작업 227
 
-    def _check_one(variant: str, view: str) -> tuple[dict, bytes | None]:
-        """뷰 1장 검사(+필요하면 다시 그리기). 반환: (checks 항목, 다시 그린 그림 또는 None)."""
-        image, key = views[(variant, view)]
+    def _check_one(variant: str, view: str, image: bytes | None = None, redraw: bool = True) -> tuple[dict, bytes | None]:
+        """뷰 1장 검사(+필요하면 다시 그리기). 반환: (checks 항목, 다시 그린 그림 또는 None).
+
+        작업 227: image 를 주면 그 그림을 검사한다(교체한 실사). redraw=False 면 불일치여도 다시 그리지 않는다.
+        """
+        if image is None:
+            image, key = views[(variant, view)]
+        else:
+            key = views[(variant, view)][1]
         geom = geometries[view]
         size = geom.get("_size") or _size_wh(VIEW_SIZE)
         guide_back = _normalize_quad(geom.get("back"), size)
@@ -2663,6 +2761,12 @@ def _verify_views(
         matches_sides = _as_bool(payload.get("matchesSides")) if view == "front" else True
         raw_fixes = payload.get("fixesEn")
         fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
+        if outdoor:  # 작업 227: 방 · 벽 · 천장 · 실내 가구 · (낮이면) 밤 문장을 버린다.
+            kept = _outdoor_fixes(fixes, loc)
+            if len(kept) != len(fixes):
+                log.info("vnew.location.verify.fixes_dropped pid=%s lid=%s variant=%s view=%s dropped=%d kept=%d",
+                         pid, lid, variant, view, len(fixes) - len(kept), len(kept))
+            fixes = kept
 
         # 꼭짓점: Claude 가 준 값이 가이드와 4% 넘게 다르고 볼록·화면 안이면 Claude 좌표, 아니면 가이드.
         back_quad, back_method = _pick_quad(payload.get("backQuad"), guide_back, size)
@@ -2670,7 +2774,12 @@ def _verify_views(
         method = "claude" if (back_method == "claude" or front_method == "claude") else "guide"
 
         fixed_image = None
-        if not matches_place or not matches_sides:
+        mismatch = (not matches_place or not matches_sides) and redraw  # 작업 227: redraw=False(교체한 실사)는 검사만
+        if mismatch and outdoor and not fixes:
+            # 작업 227: 실외 수정 문장이 하나도 남지 않으면 다시 그리지 않는다(첫 그림 유지 · 원장 0).
+            log.info("vnew.location.redraw.skipped pid=%s lid=%s variant=%s view=%s reason=no_outdoor_fixes",
+                     pid, lid, variant, view)
+        elif mismatch:
             # 작업 143: 켬이면 실사 다시 그리기도 같은 쪽 웹툰 뷰 편집(웹툰 뷰가 없으면 text-to-image).
             base = None
             if variant == "real" and _real_from_webtoon() and ("webtoon", view) in views:
@@ -2689,13 +2798,46 @@ def _verify_views(
 
     # 작업 125: 뷰끼리 독립(다시 그리기도 참고 이미지 없이 그 뷰만)이라 동시에 한다.
     jobs = [(variant, view) for variant in VARIANTS for view in VIEWS]
+
+    def _apply(outcomes: dict) -> None:
+        for (variant, view), (entry, fixed_image) in outcomes.items():
+            if fixed_image is not None:
+                views[(variant, view)] = (fixed_image, views[(variant, view)][1])
+            checks[variant][view] = entry
+
+    if outdoor and _real_from_webtoon():
+        # 작업 227: 실외 + 실사=웹툰 편집이면 웹툰을 먼저 검사(+다시 그리기)하고, 실사는 그 '최종' 웹툰으로 맞춘다.
+        # 다시 그린 쪽 실사는 새 웹툰 바이트로 edit 1회(원장 1건) 교체 후 1회 검사만. 나머지 실사는 지금처럼 검사(+다시 그리기,
+        # 바탕 = 최종 웹툰 = 첫 웹툰). 교체가 실패하면 그 쪽도 지금처럼 검사(+다시 그리기, 바탕 = 새 웹툰).
+        webtoon_jobs = [job for job in jobs if job[0] == "webtoon"]
+        with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-verify-{lid}") as pool:
+            futures = {job: pool.submit(_check_one, job[0], job[1]) for job in webtoon_jobs}
+            webtoon_outcomes = {job: futures[job].result() for job in webtoon_jobs}
+        _apply(webtoon_outcomes)
+        redrawn = {view for (_variant, view), (_entry, fixed) in webtoon_outcomes.items() if fixed is not None}
+
+        def _real_one(view: str) -> tuple[dict, bytes | None]:
+            if view in redrawn:
+                base = views[("webtoon", view)][0]
+                new = _redraw_view(owner, pid, lid, version, loc, "real", view, views[("real", view)][1], guides[view],
+                                   refs, [], task_id, base=base)
+                if new is not None:
+                    log.info("vnew.location.real.rebased pid=%s lid=%s view=%s", pid, lid, view)
+                    entry, _ = _check_one("real", view, image=new, redraw=False)
+                    entry["fixedEn"] = True
+                    return entry, new
+            return _check_one("real", view)
+
+        real_jobs = [job for job in jobs if job[0] == "real"]
+        with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-verify-{lid}") as pool:
+            futures = {job: pool.submit(_real_one, job[1]) for job in real_jobs}
+            _apply({job: futures[job].result() for job in real_jobs})
+        return checks
+
     with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-verify-{lid}") as pool:
         futures = {job: pool.submit(_check_one, job[0], job[1]) for job in jobs}
         outcomes = {job: futures[job].result() for job in jobs}
-    for (variant, view), (entry, fixed_image) in outcomes.items():
-        if fixed_image is not None:
-            views[(variant, view)] = (fixed_image, views[(variant, view)][1])
-        checks[variant][view] = entry
+    _apply(outcomes)
     return checks
 
 
@@ -2703,6 +2845,8 @@ def _verify_view(
     owner: str, pid: str, lid: str, loc: dict, variant: str, view: str, image: bytes, guide: bytes, refs: list[bytes]
 ) -> tuple[dict, dict]:
     """뷰 한 장을 가이드·패널과 비교한다. (payload, usage). payload 는 _VERIFY_TOOL 모양."""
+    if _is_outdoor(loc):
+        return _verify_view_outdoor(owner, pid, lid, loc, variant, view, image, guide, refs)
     side_text = (
         "This is the back view (its side walls are left=west, right=east)."
         if view == "back"
@@ -2742,6 +2886,56 @@ def _verify_view(
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
     blocks.append({"image": {"format": "jpeg", "source": {"bytes": image}}})
     payload, usage = _verify(blocks, model=VERIFY_MODEL)
+    _charge_text(owner, pid, lid, usage, str(usage.get("model") or VERIFY_MODEL))
+    return payload or {}, usage
+
+
+def _verify_view_outdoor(
+    owner: str, pid: str, lid: str, loc: dict, variant: str, view: str, image: bytes, guide: bytes, refs: list[bytes]
+) -> tuple[dict, dict]:
+    """작업 227: _verify_view 의 실외판. 같은 이미지 순서(가이드 → 사진 → 패널 → 생성 뷰), 열린 바깥 글 ·
+    물건 목록 · 빛. system · tool 은 _VERIFY_SYSTEM_OUTDOOR · _VERIFY_TOOL_OUTDOOR. 낮이면 밤 낱말을 지운다."""
+    side_text = (
+        "This is the back view (its left side looks west, its right side looks east)."
+        if view == "back"
+        else "This is the front view (the same open-air place seen from the opposite side; its left side looks east, "
+        "its right side looks west)."
+    )
+    photo_items: list[dict] = []
+    for item in _view_photo_plan(loc, view, lead=1):
+        jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
+        if jpeg is not None:
+            photo_items.append({"side": item["side"], "jpeg": jpeg})
+    photo_question = ""
+    if photo_items:
+        sides_ko = ", ".join(
+            PHOTO_SIDE_LABELS_KO.get(p["side"], p["side"]) for p in photo_items if p["side"] != "any"
+        )
+        photo_question = (
+            " Real reference photos of this place follow the guide. For any side that has a reference "
+            f"photo ({sides_ko or 'overall look'}), matchesPlace is true only if the generated side "
+            "matches that photo's objects, materials and colors."
+        )
+    objects = vpoc_compose._fit_text("; ".join(_outdoor_objects(loc)), VERIFY_OBJECTS_MAX_CHARS)  # noqa: SLF001
+    light = _light_text(loc).rstrip(" .")
+    text = (
+        f"Image 1 is the layout guide for the {view} fixed-camera view of this open-air place. {side_text}"
+        + photo_question
+        + (f" Main objects of this place: {objects}." if objects else "")
+        + (f" Time of day and light: {light}." if light else "")
+        + " Then the reference webtoon panels, then the generated view. Does the generated view show the same "
+        "open-air place under open sky, and where are the MAIN BACKGROUND and full-frame corners? Call emit_verify."
+    )
+    blocks: list[dict] = [
+        {"text": _day_guard(text, loc)},
+        {"image": {"format": "jpeg", "source": {"bytes": guide}}},
+    ]
+    for item in photo_items:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": item["jpeg"]}}})
+    for jpeg in refs:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    blocks.append({"image": {"format": "jpeg", "source": {"bytes": image}}})
+    payload, usage = _verify(blocks, model=VERIFY_MODEL, system_text=_VERIFY_SYSTEM_OUTDOOR, tool=_VERIFY_TOOL_OUTDOOR)
     _charge_text(owner, pid, lid, usage, str(usage.get("model") or VERIFY_MODEL))
     return payload or {}, usage
 
