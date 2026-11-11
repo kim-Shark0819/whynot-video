@@ -7862,6 +7862,7 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
     submitted_n = 0
     parts = [dict(p) for p in parts]
     kling_ctx: dict | None = None  # 작업 169: likeness 2단계 조각의 컷 단위 Kling 재료(처음 쓸 때 1번)
+    anime_ctx: dict | None = None  # 작업 229: 애니 조각 Kling 컷 재료(처음 쓸 때 1번)
     try:
         at = 0
         while at < len(parts):
@@ -7878,6 +7879,15 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                     records.append({**part, "sig": sig, "status": "pending", "invocationArn": "", "outputPrefix": "",
                                     "outputKey": "", "error": ""})
                     continue
+                if not real:
+                    # 작업 229: 애니 조각을 모든 모델이 거절 → 그 조각의 컷 하나(Kling, 웹툰 재료 · 애니 글).
+                    if anime_ctx is None:
+                        anime_ctx = _anime_kling_ctx(owner, pid, gen_id, index, claim, plan, take)
+                    records.append(_submit_anime_kling_cut(owner, pid, gen_id, plan, anime_ctx, take, part, sig))
+                    submitted_n += 1
+                    log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=1 variant=webtoon "
+                             "kling=1", pid, take_id, int(part.get("no") or 0), len(parts), part["start"], part["end"])
+                    continue
                 if kling_ctx is None:
                     kling_ctx = _kling_part_ctx(owner, pid, gen_id, index, claim, plan, take)
                 used = _used_parts(records)
@@ -7892,6 +7902,13 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             old = previous.get(_json_key(sig))
             if old and old.get("status") == "completed" and old.get("outputKey"):
                 records.append(dict(old))
+                continue
+            if not real and old and _anime_kling_of(old):
+                # 작업 229: 이 애니 조각은 컷 단위 Kling 으로 바뀌었다 — 조각 기록은 superseded 로 남기고 그 컷들을 바로 뒤에 둔다.
+                records.append({**old, "sig": sig, "status": PART_SUPERSEDED, "replacedBy": KLING_CUTS_REPLACED,
+                                "invocationArn": "", "outputKey": "", "error": ""})
+                records[-1].pop("failureKind", None)
+                parts[at:at] = _kling_part_items(plan, take, part)
                 continue
             lk_step, lk_retry, _lk_extra = _part_likeness(old) if real else (0, 0, 0)
             if lk_step >= 2:
@@ -8067,6 +8084,8 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             else:
                 updates[number] = {"status": "failed", "error": str(result.get("failureMessage") or "영상 생성 실패")[:300],
                                    "failureKind": str(result.get("failureKind") or "")}
+            if variant != "real":
+                continue  # 작업 229: 애니 조각 Kling 컷은 프롬프트 기록 줄이 없다(⑦ 편집 재료에 웹툰 컷 칸을 만들지 않는다)
             _log_kling_cut_result(owner, pid, gen_id, str(_previz_cells(gen)[index].get("id") or index),
                                   {**part, **updates[number], "invocationArn": arn})
             continue
@@ -8115,7 +8134,27 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             if not any(p.get("status") == "submitted" for p in parts):
                 _escalate_likeness_parts(owner, pid, gen_id, index, claim)
             return
-        if all(p.get("failureKind") == CONTENT_FLAG_KIND for p in failed):
+        if variant == "webtoon" and any(p.get("kind") == "kling" for p in failed):
+            # 작업 229: 애니 조각의 Kling 컷도 거절 · 실패 → 그 조각을 Kling 으로 보낸 때의 지금 문구 + Kling 문구로 칸 실패(되돌아가지 않는다).
+            _fail_anime_kling(owner, pid, gen_id, index, claim, parts, next(p for p in failed if p.get("kind") == "kling"))
+            return
+        if _likeness_rejected(error) and _anime_fallback_target(gen, index, variant):
+            # 작업 228: 애니 조각 likeness 거절 → 아직 도는 조각을 기다렸다가(이중 제출 없음) 테이크 전체를 대체 모델로 조각 1부터.
+            if any(p.get("status") == "submitted" for p in parts):
+                return
+            if _anime_likeness_fallback(owner, pid, gen_id, index, variant, claim, error, part=failed[0]):
+                return
+        if variant == "webtoon" and all(_likeness_rejected(p.get("error")) for p in failed) \
+                and _anime_kling_open(gen, index, variant, failed):
+            # 작업 229 (a)·(b): 애니 조각 likeness 거절(228 대체를 이미 썼거나 못 씀 · 콘텐츠 2단계 대체 모델) → 그 조각 컷만 Kling.
+            if any(p.get("status") == "submitted" for p in parts):
+                return
+            message = f"테이크 조각 {failed[0].get('no')}/{len(parts)} 이 실패했습니다: {error}"
+            if _anime_kling_parts(owner, pid, gen_id, index, claim, failed, reason="likeness", message=message):
+                return
+        anime_fb = _anime_fallback_of(_previz_cells(gen)[index][variant])  # 작업 228: 대체 테이크 실패는 단계 없이 지금 문구로
+        # 작업 229: 컷 단위 Kling 이 있으면 대체 테이크도 콘텐츠 단계를 탄다(사다리 끝 · 대체 모델 likeness → Kling).
+        if (not anime_fb or _anime_kling_model()) and all(p.get("failureKind") == CONTENT_FLAG_KIND for p in failed):
             # 작업 153: 콘텐츠 검사 거절만 있으면 아직 도는 조각을 기다렸다가(이중 제출 없음) 거절된 조각만 다음 단계로.
             if not any(p.get("status") == "submitted" for p in parts):
                 _escalate_content_parts(owner, pid, gen_id, index, variant, claim)
@@ -8744,22 +8783,29 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
     """152 조각 칸: 콘텐츠 검사로 거절된 조각만 다음 단계로(조각마다 0→1→2). 끝난 조각은 재시도 때 그대로 쓴다.
 
     어느 조각이든 마지막 단계에서 또 거절이면 그 조각 컷 번호로 칸 실패. 아니면 칸을 queued 로 둔다(제출이 조각 단계를 읽는다).
+    작업 229: 애니 조각이 마지막 단계에서 또 거절이면(컷 단위 Kling 이 있을 때) 실패 대신 그 조각 컷만 Kling(animeKling).
     """
     box: dict = {}
+    kling = _anime_kling_model() if variant == "webtoon" else ""  # 작업 229
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
         if not _claim_ok_variant(g, index, variant, claim):
             raise _Discard()
         state = _previz_cells(g)[index][variant]
-        original = _real_take_model(g) if variant == "real" else str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        # 작업 229: 애니 = 그 칸을 낸 모델(228 대체 기록이 있으면 대체 모델, 없으면 gen.videoModel — 지금과 같은 값)
+        original = _real_take_model(g) if variant == "real" else _anime_take_model(g, state)
         fallback = _content_fallback_model(original)
         flagged = [p for p in state.get("parts") or [] if isinstance(p, dict) and p.get("status") == "failed"
                    and p.get("failureKind") == CONTENT_FLAG_KIND]
         moves = []
+        to_kling = []
         for part in flagged:
             step = _content_step(part)
             nxt = _content_next(step, fallback, variant == "real")  # 작업 163, 168: 실사 4·5단계
+            if not nxt and kling and part.get("kind") != "kling" and not _anime_kling_of(part):
+                to_kling.append(part)  # 작업 229 (c): 콘텐츠 단계 끝 → 그 조각 컷만 Kling
+                continue
             moves.append((part, step, nxt))
             if not nxt:
                 box.update(failed=list(part.get("cutIds") or []), no=part.get("no"), part=dict(part))
@@ -8767,6 +8813,13 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
         # 작업 198: 거절된 조각마다 노트 머리(조각 상태를 바꾸기 전)·공급자 원문·다음 단계
         box["notes"] = [(_note_head(g, index, variant, part=part), str(part.get("error") or ""), _content_action(nxt, fallback))
                         for part, _step, nxt in moves]
+        box["notes"] += [(_note_head(g, index, variant, part=part), str(part.get("error") or ""),
+                          vnew_model_notes.ACTION_FALLBACK + kling) for part in to_kling]
+        for part in to_kling:
+            part["animeKling"] = {"cutIds": [str(c) for c in part.get("cutIds") or []], "at": now_iso(), "model": kling,
+                                  "reason": CONTENT_FLAG_KIND, "message": CONTENT_FLAG_FAIL_TEXT.format(
+                                      cuts=_cut_range_text(data, part.get("cutIds")))}
+        box["kling"] = [p.get("no") for p in to_kling]
         for part, _step, nxt in moves:
             part["contentStep"] = nxt
             if nxt == 2:
@@ -8790,6 +8843,8 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
     for no, step, nxt in box.get("moves") or []:
         log.info("vnew.gen.content_flag step=%s pid=%s take=%d part=%s from=%d", CONTENT_STEP_NAMES.get(nxt, "failed"), pid,
                  index, no, step)
+    for no in box.get("kling") or []:
+        log.info("vnew.gen.anime_kling pid=%s take=%d part=%s reason=%s to=%s", pid, index, no, CONTENT_FLAG_KIND, kling)
     for head, error, action in box.get("notes") or []:
         vnew_model_notes.record(owner, pid, gen_id, {**head, "providerMessage": error, "kind": CONTENT_FLAG_KIND,
                                                      "action": action})
@@ -9166,7 +9221,8 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if not rec_keys:
             raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
 
-        endpoint = _real_take_model(gen) if real else str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        # 작업 228: 애니 칸에 대체 기록(animeFallback)이 있으면 그 모델로 낸다(없으면 gen.videoModel 그대로).
+        endpoint = _real_take_model(gen) if real else _anime_take_model(gen, state)
         caps = _previz_caps(endpoint)
         resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
 
@@ -9184,8 +9240,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             step = _fallback_step(state) if real else 0  # 작업 130: likeness 1단계면 인물당 정면 1장
             content_step = _content_step(state)  # 작업 153: 1 = 순화(같은 모델), 2 = 순화 + Seedance, 163: 3 = 더 센 순화
             continuity = None
-            if content_step >= 2 and _content_fallback_model(endpoint):
+            if content_step >= 2 and _content_fallback_model(endpoint) and not _anime_fallback_of(state):
                 # 작업 155: Seedance 대체 = 같은 장소 1장(맨 끝)·의상 고정·원래 모델과 같은 신원 참고·앞 테이크 마지막 프레임(있을 때).
+                # 작업 228: 애니 대체 테이크는 순화 단계만 쓰고 모델은 바꾸지 않는다(한 테이크 한 모델).
                 frame, frame_key = (None, "") if content_step >= CONTENT_STEP_DROP_REFS else _prev_take_frame(plan, index, variant)
                 continuity = {"take": take, "frame": frame, "frameKey": frame_key, "origFrame": False,
                               "origMax": int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)}
@@ -9537,6 +9594,13 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
             # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
             kind = str(poll_result.get("failureKind") or "") or _audio_kind(message)
+            if gen.get("mode") == "previz-take" and _likeness_rejected(message) \
+                    and _anime_likeness_fallback(owner, pid, gen_id, index, variant, claim, message):
+                return  # 작업 228: 애니 테이크 likeness 거절 → 테이크 전체를 대체 모델(Wan 3.0)로 1번
+            if _anime_fallback_of(state):
+                # 작업 228: 대체 모델로 낸 테이크도 실패(어떤 이유든) → 단계 없이 지금 문구로 실패.
+                _fail_variant(owner, pid, gen_id, index, variant, claim, message, kind=kind)
+                return
             if not kind and gen.get("mode") == "previz" and _prompt_size_cap(message) and not state.get("sizeRetry"):
                 # 작업 167: fal 프롬프트 크기 거절 → 더 짧은 예산으로 같은 칸을 1번 다시 낸다(두 번째 거절은 아래 그대로 실패).
                 _size_requeue(owner, pid, gen_id, index, variant, claim, _prompt_size_cap(message), message=message)
@@ -10599,6 +10663,314 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
         if box.get("step") == 1 and not kling:
             message += REAL_FALLBACK_NO_KLING
         _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind="likeness")
+
+
+# ---------------------------------------------------------------- 작업 228: 애니(웹툰) 테이크 likeness 거절 → 대체 모델 1번
+#
+# test4(11-12): Seedance 2.5 r2v 가 그린 웹툰 인물 시트·정면을 실존 인물로 보고 애니 테이크를 모두 거절했다(422 partner_validation_failed).
+# 애니 칸(webtoon)이 likeness 로 거절되면(통 테이크·조각) 테이크 전체를 VNEW_ANIME_LIKENESS_FALLBACK_MODEL(기본 Wan 3.0 r2v)로 조각 1부터
+# 다시 낸다 — 한 테이크 안에서 모델을 섞지 않는다(끝난 조각도 버린다). 칸 state.animeFallback {from, to, at} 이 그 1번의 기록이고, 있으면
+# 제출이 그 모델로 내며(_anime_take_model) 그 테이크가 또 실패하면(어떤 이유든) 단계 없이 지금 문구로 실패한다. 대체 모델의 최대 길이·
+# 참고 영상 상한(video_options)에 테이크(그 모델로 나눈 조각)가 맞지 않으면 대체하지 않고 이유를 로그에 남긴다. 실사 칸·실사 사다리·
+# 다른 거절 종류·gen.videoModel·input.videoModel·견적은 그대로. 원장은 제출 경로(_charge_take)가 대체 모델 금액으로 남긴다.
+
+ANIME_FALLBACK_TEXT = "Seedance가 인물 그림을 실존 인물로 오인해 거절해서, 이 테이크는 Wan 3.0으로 다시 만들었습니다."
+
+
+def _anime_likeness_fallback_model() -> str:
+    """대체 모델 endpoint. 빈 값이면 ""(끔). fal 등록표의 previzCapable 테이크 모델(videoListField)이 아니면 경고 1줄 + ""."""
+    endpoint = _endpoint_of(vnew_settings.VNEW_ANIME_LIKENESS_FALLBACK_MODEL)
+    if not endpoint:
+        return ""
+    caps = _previz_caps(endpoint)
+    if not caps.get("previzCapable") or not caps.get("videoListField") or caps.get("available") is False:
+        log.warning("vnew.gen.anime_likeness_fallback_invalid model=%s", endpoint)
+        return ""
+    return endpoint
+
+
+def _anime_fallback_of(state) -> dict:
+    """칸의 대체 기록(animeFallback). 없으면 {}."""
+    fallback = state.get("animeFallback") if isinstance(state, dict) else None
+    return fallback if isinstance(fallback, dict) and fallback.get("to") else {}
+
+
+def _anime_take_model(gen: dict, state: dict | None = None) -> str:
+    """애니 테이크 칸을 낼 모델: 대체 기록이 있으면 그 모델, 없으면 gen.videoModel(지금 그대로)."""
+    return str(_anime_fallback_of(state).get("to") or gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+
+
+def _anime_fallback_target(gen: dict, index: int, variant: str) -> str:
+    """대체할 모델 endpoint. 애니 통 테이크 칸이 아니거나 · 끔 · 이미 1번 했거나 · 프로젝트 모델이 그 모델이면 ""."""
+    if variant != "webtoon" or gen.get("mode") != "previz-take":
+        return ""
+    state = _previz_cells(gen)[index].get(variant) or {}
+    if _anime_fallback_of(state):  # 한 테이크에 1번
+        return ""
+    fallback = _anime_likeness_fallback_model()
+    if not fallback or _endpoint_of(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL) == fallback:
+        return ""
+    return fallback
+
+
+def _anime_fallback_misfit(plan: dict, take: dict, endpoint: str) -> str:
+    """대체 모델 상한에 맞지 않는 이유(맞으면 ""). 그 모델로 나눈 조각(없으면 테이크 전체) 중 가장 긴 것을 최대 길이·참고 영상 상한과 본다."""
+    try:
+        options = vpoc_ark.video_options(vpoc_settings.FAL_ID_PREFIX + endpoint)
+        parts = _take_parts_for(plan, take, endpoint)
+    except VpocError as exc:
+        return f"split={exc.kind}"
+    except Exception as exc:  # noqa: BLE001
+        return f"options={type(exc).__name__}"
+    longest = max([float(p.get("seconds") or 0) for p in parts] or [float(take.get("seconds") or 0)])
+    max_s = float(options.get("maxDurationS") or 0)
+    ref_s = float(options.get("maxRefVideoS") or 0) if options.get("videoInput") else 0.0
+    if max_s > 0 and longest > max_s + TAKE_PART_TOL_S:
+        return f"duration={longest:.1f}>{max_s:g}"
+    if ref_s > 0 and longest > ref_s + TAKE_PART_TOL_S:
+        return f"refVideo={longest:.1f}>{ref_s:g}"
+    return ""
+
+
+def _anime_likeness_fallback(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str,
+                             part: dict | None = None) -> bool:
+    """애니 칸 likeness 거절 → 테이크 전체를 대체 모델로 queued(조각 기록을 지워 조각 1부터). 했으면 True, 아니면 False(지금처럼 실패).
+
+    모델 노트 1줄(거절된 시도 머리, kind likeness, action fallbackModel:<대체 모델>)."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if not _claim_ok_variant(gen, index, variant, claim):
+        return False
+    fallback = _anime_fallback_target(gen, index, variant)
+    if not fallback:
+        return False
+    take = _previz_cells(gen)[index]
+    original = _endpoint_of(_anime_take_model(gen, take.get(variant)))
+    misfit = _anime_fallback_misfit(plan, take, fallback)
+    if misfit:
+        log.info("vnew.gen.anime_likeness_fallback_skip pid=%s take=%d to=%s reason=%s", pid, index, fallback, misfit)
+        return False
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        box["head"] = _note_head(g, index, variant, part=part)  # 거절된 시도의 머리(상태를 바꾸기 전)
+        state = _previz_cells(g)[index][variant]
+        state.update(status="queued", invocationArn="", outputPrefix="", outputKey="", error="", claim="", claimedAt="")
+        for key in ("parts", "failureKind", "pendingCharge", "contentFallback", "qc", "sizeRetry"):
+            state.pop(key, None)
+        if state.get("note") == TEXT_LEFT_NOTE:
+            state.pop("note", None)
+        state["animeFallback"] = {"from": original, "to": fallback, "at": now_iso()}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return False
+    log.info("vnew.gen.anime_likeness_fallback pid=%s take=%d from=%s to=%s", pid, index, original, fallback)
+    vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": message, "kind": "likeness",
+                                                 "action": vnew_model_notes.ACTION_FALLBACK + fallback})
+    return True
+
+
+# ---------------------------------------------------------------- 작업 229: 애니(웹툰) 조각을 모든 모델이 거절 → 그 조각 컷만 Kling
+#
+# test4(11-12): Wan 애니 테이크 조각 3(c13)이 Wan 콘텐츠 거절 → 콘텐츠 2단계 Seedance 가 likeness 거절 → 테이크 실패. 실사는 같은
+# 인물을 컷 단위 Kling(_kling_cut_model)이 받았다. 애니 조각(state.parts)이 (a) likeness 거절(228 대체를 썼거나 못 씀) · (b) 콘텐츠
+# 2단계 대체 모델 likeness 거절 · (c) 콘텐츠 단계 끝이면 그 조각 기록에 animeKling {cutIds, at, model, reason, message}을 적고 칸을
+# queued — 제출이 그 조각을 superseded(replacedBy kling-cuts)로 두고 컷마다 Kling 1번(_kling_part_items · _submit_anime_kling_cut:
+# elements = 웹툰 정면 + 시트, @Image1 = 웹툰 장소 뷰, 글 = 애니 테이크 프롬프트(_vibe_take_prompt real=False)의 STYLE · look · 눈 ·
+# 샷 · 소리 줄). 조회 · 잇기(_conform_concat, 조각 길이로 자르고 채움)는 169 Kling 컷과 같은 길. Kling 컷도 실패면 animeKling.message
+# + ANIME_KLING_FAIL_TAIL 로 칸 실패(되돌아가지 않는다). 원장 = _charge_kling_cut(Kling 초당 단가 × 보낸 길이). 끔이면 지금 그대로.
+
+ANIME_KLING_TEXT = "Wan·Seedance가 거절한 컷({cuts})은 Kling O3로 컷 단위로 만들었습니다."
+ANIME_KLING_FAIL_TAIL = "Kling도 거절했습니다."
+ANIME_KLING_ELEMENT_LINE = "{tag} is {name}: keep exactly this webtoon character's face, hair and design."
+ANIME_KLING_ELEMENT_SHEET = ("{tag} is {name}: keep exactly this webtoon character's face, hair and design (its second image "
+                             "is the character sheet).")
+# 애니 테이크 프롬프트에서 Kling 컷에 맞지 않는 줄(프리비즈 영상 줄 · 여러 샷 단락 — Kling 컷은 영상 입력이 없는 샷 1개).
+ANIME_KLING_DROP = ("@Video1", "A multi-shot sequence")
+
+
+def _anime_kling_model() -> str:
+    """애니 Kling 단계 endpoint(실사 사다리와 같은 _kling_cut_model). 끔 · 없음 · elements 를 받지 않으면 ""."""
+    if not vnew_settings.VNEW_ANIME_KLING_FALLBACK:
+        return ""
+    model = _kling_cut_model()
+    return str(model[0]) if model and (model[1] or {}).get("elementsField") else ""
+
+
+def _anime_kling_of(part) -> dict:
+    """조각 기록의 animeKling(없으면 {})."""
+    value = part.get("animeKling") if isinstance(part, dict) else None
+    return value if isinstance(value, dict) and value.get("cutIds") else {}
+
+
+def _anime_kling_open(gen: dict, index: int, variant: str, failed: list[dict]) -> bool:
+    """실패한 조각들을 Kling 으로 보낼 수 있는가: 애니 조각 테이크 · 켬 · 모두 Kling 컷이 아니고 아직 보낸 적 없음."""
+    if variant != "webtoon" or gen.get("mode") != "previz-take" or not failed or not _anime_kling_model():
+        return False
+    state = _previz_cells(gen)[index].get(variant) or {}
+    return bool(state.get("parts")) and all(p.get("kind") != "kling" and not _anime_kling_of(p) for p in failed)
+
+
+def _anime_kling_parts(owner: str, pid: str, gen_id: str, index: int, claim: str, failed: list[dict], *, reason: str,
+                       message: str) -> bool:
+    """실패한 애니 조각(failed, sig 로 찾는다)에 animeKling 을 적고 칸 queued. 했으면 True. 노트 = 조각마다 fallbackModel:<Kling>."""
+    kling = _anime_kling_model()
+    sigs = {_json_key(p.get("sig")) for p in failed}
+    box: dict = {"notes": [], "nos": []}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, "webtoon", claim):
+            raise _Discard()
+        state = _previz_cells(g)[index]["webtoon"]
+        for part in state.get("parts") or []:
+            if not isinstance(part, dict) or part.get("status") != "failed" or _json_key(part.get("sig")) not in sigs \
+                    or part.get("kind") == "kling" or _anime_kling_of(part):
+                continue
+            box["notes"].append((_note_head(g, index, "webtoon", part=part), str(part.get("error") or "")))
+            part["animeKling"] = {"cutIds": [str(c) for c in part.get("cutIds") or []], "at": now_iso(), "model": kling,
+                                  "reason": reason, "message": message}
+            box["nos"].append(part.get("no"))
+        if not box["nos"]:
+            raise _Discard()
+        state.pop("pendingCharge", None)
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return False
+    for no in box["nos"]:
+        log.info("vnew.gen.anime_kling pid=%s take=%d part=%s reason=%s to=%s", pid, index, no, reason, kling)
+    for head, error in box["notes"]:
+        vnew_model_notes.record(owner, pid, gen_id, {**head, "providerMessage": error, "kind": reason,
+                                                     "action": vnew_model_notes.ACTION_FALLBACK + kling})
+    return True
+
+
+def _fail_anime_kling(owner: str, pid: str, gen_id: str, index: int, claim: str, parts: list[dict], cut: dict) -> None:
+    """애니 조각 Kling 컷 실패 → 그 조각을 Kling 으로 보낼 때의 지금 문구 + ANIME_KLING_FAIL_TAIL 로 칸 실패."""
+    origin = next((p for p in parts if p.get("kind") != "kling" and p.get("no") == cut.get("fromPart")
+                   and _anime_kling_of(p)), {})
+    record = _anime_kling_of(origin)
+    error = str(cut.get("error") or "")
+    message = str(record.get("message") or f"테이크 조각 {cut.get('fromPart')}/{len(_used_parts(parts))} 이 실패했습니다: {error}")
+    log.info("vnew.gen.anime_kling step=failed pid=%s take=%d part=%s cut=%s", pid, index, cut.get("fromPart"), cut.get("cutId"))
+    _fail_variant(owner, pid, gen_id, index, "webtoon", claim, message.rstrip() + " " + ANIME_KLING_FAIL_TAIL,
+                  kind=str(record.get("reason") or "likeness"), note={"part": cut, "providerMessage": error})
+
+
+def _anime_kling_ctx(owner: str, pid: str, gen_id: str, index: int, claim: str, plan: dict, take: dict) -> dict:
+    """애니 조각 Kling 컷 재료(모델 · caps · 프롬프트 상한 · 캐릭터 · 장면 옷 · 하트비트). 모델이 없으면 오류."""
+    endpoint = _anime_kling_model()
+    model = _kling_cut_model() if endpoint else None
+    if not model:
+        raise VpocError("vnew.generate", "KlingMissing", "컷 단위 Kling 모델이 fal 등록표에 없습니다.", 409)
+    caps = model[1]
+    try:
+        resolved = _resolve_cast(owner, pid, plan, take, read=False)
+    except Exception as exc:  # noqa: BLE001 — 장면 옷이 없어도 낸다(캐릭터 기본 옷)
+        log.warning("vnew.gen.anime_kling_cast_failed pid=%s err=%s", pid, _msg(exc))
+        resolved = {}
+
+    def beat() -> None:
+        if not _touch_prepare_claim(owner, pid, gen_id, index, "webtoon", claim):
+            raise _Discard()
+
+    return {"endpoint": endpoint, "caps": caps, "modelId": vpoc_settings.FAL_ID_PREFIX + endpoint,
+            "promptMax": vpoc_settings.fal_prompt_max(endpoint, caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX),
+            "charById": _char_by_id(owner, plan), "resolved": resolved, "takeId": str(take.get("id") or index),
+            "index": index, "attempt": int((take.get("webtoon") or {}).get("attempt") or 1), "beat": beat}
+
+
+def _anime_kling_prompt(plan: dict, sub: dict, cast: list[dict], *, location_no, caps: dict, bases: dict,
+                        element_lines: list[str]) -> str:
+    """Kling 컷 글 = 애니 테이크 프롬프트(그 컷만, 실사 글 없음)에서 ANIME_KLING_DROP 줄을 빼고 @Element 줄을 소리 줄(맨 끝) 앞에."""
+    text = _vibe_take_prompt(plan, sub, real=False, cast=cast, location_no=location_no, caps=caps, bases=bases, quiet=True)
+    lines = [line.replace(VIBE_MIRROR_NOTE, "") for line in text.split("\n") if not line.startswith(ANIME_KLING_DROP)]
+    tail = lines.pop() if lines else ""
+    return "\n".join([*lines, *element_lines, tail])
+
+
+def _submit_anime_kling_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, take: dict, item: dict,
+                            sig: list) -> dict:
+    """애니 조각 Kling 컷 하나 제출(시작 그림 없음 — 178 하드 컷 elements Kling 과 같은 본문). 원장 = _charge_kling_cut."""
+    endpoint, caps = ctx["endpoint"], ctx["caps"]
+    cut_id = str(item.get("cutId") or "")
+    seconds = float(item.get("seconds") or 0)
+    duration = _kling_duration(caps, seconds)
+    sub = _part_take(plan, take, {"cutIds": [cut_id], "seconds": seconds})
+    actors = _segment_actors(plan, sub)
+    char_by_id = ctx.get("charById") or {}
+
+    def uri(jpeg: bytes) -> str:
+        return "data:image/jpeg;base64," + base64.b64encode(_fit_ref(jpeg)).decode("ascii")
+
+    loc = _take_location_jpeg(plan, sub, variant="webtoon") if caps.get("imageListField") else None
+    images = [loc] if loc is not None and int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX) > 0 else []
+    room = max(0, min(int(vnew_settings.PREVIZ_REAL_MAX_ELEMENTS or 0), int(vnew_settings.PREVIZ_MAX_INPUTS) - len(images)))
+    elements: list[dict] = []
+    keys: list[str] = []
+    lines: list[str] = []
+    for actor in actors:
+        if len(elements) >= room:
+            break
+        char = char_by_id.get(str(actor.get("charId") or "")) or {}
+        front_key, sheet_key = str(char.get("webtoonFrontKey") or ""), str(char.get("webtoonSheetKey") or "")
+        front = _load_jpeg(front_key) if front_key else None
+        if front is None:
+            continue
+        sheet = _load_jpeg(sheet_key) if sheet_key and sheet_key != front_key else None
+        elements.append({"frontal_image_url": uri(front), "reference_image_urls": [uri(sheet)] if sheet is not None else []})
+        keys.append(front_key)
+        name = str(actor.get("name") or "")
+        lines.append((ANIME_KLING_ELEMENT_SHEET if sheet is not None else ANIME_KLING_ELEMENT_LINE).format(
+            tag=f"@Element{len(elements)}", name=_romanize_name(name) or name))
+        del front, sheet
+    _refs, cast = _vibe_anime_cast(actors, char_by_id, ctx.get("resolved") or {}, 0)
+    cut_max = _kling_cut_prompt_max(ctx, len(elements) + len(images))
+    prompt = _anime_kling_prompt(plan, sub, cast, location_no=1 if images else None,
+                                 caps={**caps, "promptMaxLength": cut_max}, bases=_base_outfits(actors, char_by_id),
+                                 element_lines=lines)
+    ctx["beat"]()  # 유료 제출 전 하트비트 + 선점 확인
+    out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{ctx['takeId']}-webtoon-{cut_id}", int(ctx.get("attempt") or 1))
+    body = vpoc_fal.build_payload({**caps, "durations": [duration]}, prompt=prompt, keyframe_jpeg_b64="", duration_s=duration,
+                                  prompt_max=cut_max)
+    if elements:
+        body[str(caps["elementsField"])] = elements
+    if images:
+        body[str(caps["imageListField"])] = [uri(jpeg) for jpeg in images]
+    elements, images = [], []
+    sent_prompt = str(body.get(caps.get("promptField") or "prompt") or "")
+    result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
+    del body
+    request_id = str(result.get("request_id") or "")
+    if not request_id:
+        raise VpocError("vnew.generate", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
+    _charge_kling_cut(owner, pid, gen_id, "fal-kcut-" + request_id, endpoint, duration)
+    arn = f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}"
+    log.info("vnew.gen.anime_kling_submit pid=%s take=%s cut=%s endpoint=%s duration=%d elements=%d location=%d",
+             pid, ctx["takeId"], cut_id, endpoint, duration, len(keys), 1 if loc is not None else 0)
+    record = {**item, "sig": sig, "kind": "kling", "cutId": cut_id, "cutIds": [cut_id], "seconds": seconds,
+              "duration": duration, "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "",
+              "error": "", "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "klingModel": endpoint,
+              "klingRefs": "elements" if keys else "none", "startImage": "none"}
+    if keys:
+        record["klingElements"] = keys
+    return record
+
+
+def _anime_kling_view(state: dict) -> dict | None:
+    """화면 한 줄: Kling 으로 만든 애니 조각의 컷 {cutIds, text}. 없으면 None."""
+    cut_ids = [str(c) for p in (state or {}).get("parts") or [] for c in _anime_kling_of(p).get("cutIds") or []]
+    if not cut_ids:
+        return None
+    return {"cutIds": cut_ids, "text": ANIME_KLING_TEXT.format(cuts=", ".join(cut_ids))}
 
 
 # ---------------------------------------------------------------- 작업 169: 152 조각 실사 테이크의 조각 단위 likeness 사다리
@@ -15136,6 +15508,14 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         if isinstance(content_fb, dict) and content_fb.get("to"):
             # 작업 153: 콘텐츠 검사로 Seedance 로 만든 칸(화면 한 줄). 없으면 키 없음(옛 보기와 같다).
             out["contentFallback"] = {"from": str(content_fb.get("from") or ""), "to": str(content_fb.get("to") or "")}
+        anime_fb = _anime_fallback_of(state)
+        if anime_fb:
+            # 작업 228: likeness 거절로 대체 모델로 다시 만든 애니 테이크(화면 한 줄). 없으면 키 없음(옛 보기와 같다).
+            out["animeFallback"] = {"from": str(anime_fb.get("from") or ""), "to": str(anime_fb.get("to") or ""),
+                                    "at": str(anime_fb.get("at") or ""), "text": ANIME_FALLBACK_TEXT}
+        anime_kling = _anime_kling_view(state) if state.get("status") != "failed" else None
+        if anime_kling:
+            out["animeKling"] = anime_kling  # 작업 229: 모든 모델이 거절한 애니 조각 컷을 Kling 으로(화면 한 줄). 없으면 키 없음.
         fallback = state.get("fallback")
         if isinstance(fallback, dict) and fallback.get("step"):
             # 작업 130: likeness 단계(⑤ 실사 행 문구). 컷 단위는 끝난 컷 수 / 전체 컷 수. 없으면 키 없음(옛 보기와 같다).
@@ -15643,6 +16023,8 @@ def _note_cell_model(gen: dict, state: dict, variant: str) -> str:
     anime = _endpoint_of(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
     if gen.get("mode") != "previz-take":
         return anime
+    if variant == "webtoon" and _anime_fallback_of(state):
+        return _endpoint_of(_anime_fallback_of(state)["to"])  # 작업 228: 대체 모델로 낸 애니 테이크
     fallback = state.get("fallback") if isinstance(state.get("fallback"), dict) else {}
     if variant == "real" and fallback.get("model"):
         return _endpoint_of(fallback["model"])
