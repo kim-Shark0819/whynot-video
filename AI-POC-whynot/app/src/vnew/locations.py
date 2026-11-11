@@ -1353,14 +1353,41 @@ _GUARD_CLAUSES = ("CENTER BACK WALL", "LEFT WALL", "RIGHT WALL", "continuous", "
 
 
 def _style_clause(variant: str, loc: dict) -> str:
-    """그림체 지시. real=실사, webtoon=프로젝트 원작 그림체(캐릭터 analysis.styleEn 있으면 그것)."""
+    """그림체 지시. real=실사, webtoon=프로젝트 원작 그림체(캐릭터 analysis.styleEn 있으면 그것).
+    작업 223: 웹툰은 화풍 줄 + 인물과 같은 선 굵기 · 칠 · 팔레트 문장(VIEW_STYLE_223 — 새 그림만, 저장된 그림 · 지시문은 그대로)."""
     if variant == "real":
         return "Photoreal, natural light."
     style = str(loc.get("styleEn") or "").strip()
+    if VIEW_STYLE_223:
+        return (style or WEBTOON_STYLE_DEFAULT).rstrip(" .") + ". " + VIEW_MATCH_CHARACTERS.format(palette=view_palette(loc))
     if style:
         return style + " Match this drawing style exactly."
     # 작업 125: 참고 패널을 그림 모델에 보내지 않으므로 '참고 패널 그림체' 대신 글로 적는다.
     return "Korean webtoon drawing style: clean line art, flat cel shading, soft colors."
+
+
+# 작업 223: 웹툰 장소 뷰가 인물과 같은 그림체 · 팔레트(벽 · 바닥 질감 · 참고 뷰). 검사(223 전 기대값)만 끈다(check_bg_harmony_223).
+VIEW_STYLE_223 = True
+WEBTOON_STYLE_DEFAULT = "Korean webtoon drawing style: clean line art, flat cel shading, soft colors"
+VIEW_MATCH_CHARACTERS = ("Match this drawing style exactly: walls, floor, props and textures use the same line weight, cel "
+                         "shading and palette as the webtoon characters ({palette}).")
+_VIEW_PALETTE_RE = re.compile(r"[^.;,]*\b(?:palette|pastel|colou?rs?|tones?|hues?|saturat\w*|monochrome)\b[^.;,]*", re.IGNORECASE)
+
+
+def view_palette(loc: dict) -> str:
+    """작업 223: 장소 뷰 팔레트 = 화풍 줄(styleEn)의 색 구절 + 벽 색(사실). 없으면 웹툰 기본 팔레트."""
+    pieces: list[str] = []
+    match = _VIEW_PALETTE_RE.search(str(loc.get("styleEn") or ""))
+    if match and match.group(0).strip():
+        pieces.append(" ".join(match.group(0).split()))
+    colors: list[str] = []
+    for side in SIDES:
+        color = str((((loc.get("facts") or {}).get("walls") or {}).get(side) or {}).get("wallColorEn") or "").strip()
+        if color and color.lower() not in (c.lower() for c in colors):
+            colors.append(color)
+    if colors:
+        pieces.append(" and ".join(colors[:2]) + " walls")
+    return "; ".join(pieces) or "soft webtoon colors"
 
 
 def _layout_clause(loc: dict, view: str) -> str:
@@ -1641,7 +1668,12 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
     if _LAYOUT_MARK not in text:
         text += " " + _layout_clause(loc, view)
     style = _style_clause(variant, loc)
-    if style.split(".")[0] not in text:
+    front = ""
+    if VIEW_STYLE_223 and variant != "real":
+        # 작업 223: 화풍 줄 + 인물과 같은 선 · 칠 · 팔레트 문장은 공통 문장 바로 뒤(상한 자르기에서 빠지지 않게, 한 번만).
+        text = " ".join(text.replace(style, " ").split())
+        front = style
+    elif style.split(".")[0] not in text:
         text += " " + style
     faces = _view_face_facts(loc, view)
     if "CENTER BACK WALL" not in text:
@@ -1663,6 +1695,8 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
         text += " " + _NO_PEOPLE
     text += " " + _NO_TEXT
     text = _with_extra(text, loc)
+    if front:
+        text = front + " " + text.strip()
     if anchor:
         text = anchor + " " + text.strip()
     # 너무 짧으면 사실 설명으로 늘린다(1,500자 미만 방지).

@@ -2930,12 +2930,13 @@ def _result_range_line(rng: dict) -> str:
 
 
 def _drop_context(lines: list[str], fixed: int, max_bytes: int) -> tuple[list[str], int]:
-    """작업 191 fix1: 자르기 뒤에도 상한을 넘으면 이전 프롬프트(fixed 번째 줄부터) 줄을 뒤부터 통째로 뺀다. 참고 표시가 든 줄·정의 줄은 남긴다."""
+    """작업 191 fix1: 자르기 뒤에도 상한을 넘으면 이전 프롬프트(fixed 번째 줄부터) 줄을 뒤부터 통째로 뺀다. 참고 표시가 든 줄·정의 줄은 남긴다.
+    작업 222a: 소리 규칙 줄(generate.has_audio_rule — 211 규칙 · 222 자막 금지 문장이 붙은 줄)도 남긴다. 그래도 상한을 넘으면 지금처럼 넘은 채 돌려준다."""
     dropped = 0
     at = len(lines) - 1
     while _bytes_of("\n".join(lines)) > int(max_bytes) and at >= fixed:
         line = lines[at]
-        if line.strip() and not _REF_RE.search(line) and not _is_def(line):
+        if line.strip() and not _REF_RE.search(line) and not _is_def(line) and not generate.has_audio_rule(line):
             del lines[at]
             dropped += 1
         at -= 1

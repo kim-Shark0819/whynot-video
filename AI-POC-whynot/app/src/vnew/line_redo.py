@@ -495,7 +495,8 @@ def hard_cut_lines(cuts_at=()) -> list[str]:
     return out
 
 
-def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0, cuts_at=()) -> list[str]:
+def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0, cuts_at=(), *, anime: bool = False,
+                    setting: str | tuple = "") -> list[str]:
     """작업 212 fix1: 대사 다시 만들기 EDIT 줄(고정 틀 — ⑦ 의 "구도가 바뀌어도 끝까지 적용" 머리를 쓰지 않는다)과 소리 규칙 한 줄.
 
     EDIT = 입·얼굴 연기·목소리만 고침 · 구도·카메라·사람·자리·옷·조명·타이밍 그대로 · 새 대사는 한국어 따옴표로만(영어는 (meaning: …) 안의 뜻)
@@ -513,7 +514,30 @@ def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0, cut
     if delivery:
         parts.append(f"Acting note in Korean (do not speak it): '{delivery}'.")
     compact = bool(max_bytes) and int(max_bytes) < FULL_AUDIO_MIN_BYTES
-    return [" ".join(parts), generate.audio_rule(True, compact=compact, inner=thought), *hard_cut_lines(cuts_at)]
+    # 작업 222: 애니(webtoon) 구간이면 소리 규칙 줄 끝에 자막 금지 문장(generate.audio_rule anime — 머리 줄이라 자르지 않는다).
+    # 작업 223: setting(generate.setting_block — 배경 줄 + 조화 문장)이 있으면 머리 끝 줄(자르지 않는다, 이전 프롬프트의 배경 줄은
+    # _finish_prompt 가 뺀다 — 한 번만). 223 fix1: (긴 형, 바닥 형) 이면 상한이 FULL_AUDIO_MIN_BYTES 보다 작을 때 바닥 형.
+    if isinstance(setting, (tuple, list)):
+        setting = (setting[1] if compact else setting[0]) if setting else ""
+    return [" ".join(parts), generate.audio_rule(True, compact=compact, inner=thought, anime=anime), *hard_cut_lines(cuts_at),
+            *([setting] if str(setting or "").strip() else [])]
+
+
+# 작업 223: 이전 프롬프트(⑦ 문맥)의 배경 줄 머리(vibe 배경 줄 · 223 배경 줄) — 머리에 223 배경 줄이 있으면 뺀다.
+_SETTING_HEADS = (generate.SETTING_LINE_HEAD + ":", generate.VIBE_SETTING_HEAD + ":")
+
+
+def _line_setting(plan: dict, pieces: list[dict], rng: dict, real: bool) -> tuple[str, str]:
+    """작업 223: 대사 구간 컷 장소의 배경 줄 + 조화 문장(generate.setting_block). 컷을 모르면 대본 첫 장소. 223 끔이면 ("", "").
+    223 fix1: (긴 형, 바닥 형) — 좁은 상한(redo_edit_lines compact)이면 바닥 형(장소 + 시간대 + 주 광원 + 짧은 조화 문장)."""
+    piece = pieces[rng["piece"]] if isinstance(rng.get("piece"), int) and 0 <= rng["piece"] < len(pieces) else {}
+    line = rng.get("line") or [rng.get("start", 0.0), rng.get("end", 0.0)]
+    mid = (float(line[0]) + float(line[-1])) / 2
+    cut_id = next((str(c[2]) for c in (piece or {}).get("cuts") or []
+                   if isinstance(c, (list, tuple)) and len(c) >= 3 and float(c[0]) <= mid < float(c[1])), "")
+    cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
+    where = str(cut.get("locationEn") or "")
+    return generate.setting_block(plan, where, real=real), generate.setting_block(plan, where, real=real, room=0)
 
 
 _AUDIO_RULES = tuple(sorted({generate.AUDIO_DIALOGUE_ONLY, generate.AUDIO_DIALOGUE_ONLY_SPOKEN, generate.AUDIO_DIALOGUE_ONLY_COMPACT,
@@ -533,8 +557,13 @@ def _finish_prompt(prompt: str, old_line: str, new_line: str, max_bytes: int) ->
     at = lines.index(retake.COMPOSE_CONTEXT_LINE) + 1 if retake.COMPOSE_CONTEXT_LINE in lines else len(lines)
     head, rest = lines[:at], [line for line in lines[at:] if not line.startswith("EDIT:")]
     seen = audio_rule_count("\n".join(head)) > 0
+    no_subs = generate.ANIME_NO_SUBTITLES
+    subs_seen = bool(no_subs) and no_subs in "\n".join(head)  # 작업 222: 머리에 자막 금지 문장이 있으면 뒤의 것은 지운다(한 번만)
+    setting_seen = any(line.startswith(generate.SETTING_LINE_HEAD + ":") for line in head)  # 작업 223: 배경 줄 한 번만
     kept: list[str] = []
     for line in rest:
+        if setting_seen and line.startswith(_SETTING_HEADS):
+            continue
         if seen:
             stripped = line
             for rule in _AUDIO_RULES:
@@ -542,6 +571,8 @@ def _finish_prompt(prompt: str, old_line: str, new_line: str, max_bytes: int) ->
             line = re.sub(r" {2,}", " ", stripped).strip() if stripped != line else line
         elif audio_rule_count(line):
             seen = True
+        if subs_seen and no_subs in line:
+            line = re.sub(r" {2,}", " ", line.replace(no_subs, "")).strip()
         if line.strip():
             kept.append(line)
     context = "\n".join(kept)
@@ -1084,8 +1115,10 @@ def quote(owner: str, pid: str, payload) -> dict:
     model = picked or default_model(rows, refused)
     if model:
         body["model"] = model
+    setting = _line_setting(plan, pieces, rng, variant == "real")  # 작업 223
     rv = _compose(owner, pid, mid, body,
-                  edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes, rng["cutsAt"]))
+                  edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes, rng["cutsAt"],
+                                                                          anime=variant != "real", setting=setting))  # 작업 222 · 223
     draft = (rv or {}).get("draft") or {}
     info = draft.get("plan") or {}
     used = str(draft.get("model") or "")
