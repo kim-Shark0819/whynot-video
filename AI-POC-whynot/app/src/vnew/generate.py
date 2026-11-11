@@ -4294,16 +4294,14 @@ def setting_forms(plan: dict, location_en: str = "", *, real: bool = False, time
         def text() -> str:
             return _setting_text(parts, props, palette, light, place, tail)
 
-        while len(text()) > SETTING_LINE_MAX and len(props) > 2:
+        # 223 fix2: props and palette pieces are atomic (never clipped mid-phrase): drop whole props last-first down to zero, then whole palette pieces, then shorten the place.
+        while len(text()) > SETTING_LINE_MAX and props:
             props.pop()
-        if len(text()) > SETTING_LINE_MAX and len(palette) > 1:
+        while len(text()) > SETTING_LINE_MAX and palette:
             palette.pop()
         over = len(text()) - SETTING_LINE_MAX
         if over > 0:
             place = _clip_plain(place, max(40, len(place) - over))
-        over = len(text()) - SETTING_LINE_MAX
-        if over > 0 and props:
-            props = [_clip_plain(p, max(12, len(p) - (over + 1) // len(props))) for p in props]
         out = text()
         return out if len(out) <= SETTING_LINE_MAX else out[:SETTING_LINE_MAX - len(tail)].rstrip(" ,;") + tail
 
