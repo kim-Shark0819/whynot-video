@@ -58,6 +58,9 @@ RESUME_MAX = 2  # 작업 219: 받은 요청의 결과를 다시 받기(다시 �
 START_HOLD_S = 600.0  # 이보다 오래된 "starting" 은 끊긴 것으로 본다
 PRESIGN_S = 3600
 PRICE_UNKNOWN_LABEL = "가격 확인 불가"
+# 작업 220a: 가격 조회도 마지막 단가도 없을 때 원장 추정 단가. 출처: fal 공개 가격(fal.ai/models/fal-ai/demucs) 오디오 1초당
+# $0.0007(작업 220a 지시 값, 네트워크 없이 다시 확인하지 않았다). 화면 견적에는 쓰지 않는다(그대로 "가격 확인 불가").
+FALLBACK_USD_PER_S = 0.0007
 TIMEOUT_TEXT = "분리 모델이 시간 안에 결과를 주지 않았습니다(timeout)."
 BUTTON_TEXT = "섞인 소리 분리하기"
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -123,9 +126,9 @@ def _price(endpoint: str) -> dict | None:
 
 
 def _charge(key: str, *, seconds: float, usd: float, owner: str, pid: str, gen_id: str, price_unknown: bool = False) -> None:
-    # 작업 219: price_unknown 은 원장 항목에 넣을 칸이 없어(vpoc/ledger.py 는 이 작업 범위 밖) 분리 상태(priceUnknown) · 경고 로그에 남긴다.
+    # 작업 220a: price_unknown 이면 원장 항목에 priceUnknown: True(분리 상태 priceUnknown · 경고 로그와 함께).
     vpoc_ledger.charge(key, kind="audio", model=MODEL, units=round(float(seconds), 3), usd=float(usd), user=owner,
-                       project_id=pid, plan_id=gen_id)
+                       project_id=pid, plan_id=gen_id, price_unknown=bool(price_unknown))
 
 
 _LAST_PRICE: dict = {}  # 작업 219: 마지막으로 읽은 fal 단가(가격을 못 읽은 제출의 원장 추정에 쓴다)
@@ -139,11 +142,14 @@ def _remember_price(price) -> None:
 
 def _charge_usd(est: dict, seconds: float) -> tuple[float, bool]:
     """작업 219: 원장에 적을 금액과 가격 모름 여부. 견적 금액이 있으면 그것, 없으면 마지막으로 안 단가 × 길이(추정),
-    그것도 없으면 0 — 어느 쪽이든 가격 모름이면 (금액, True) 이고 상태(priceUnknown) · 경고 로그에 남긴다(조용히 0 을 적지 않는다)."""
+    그것도 없으면(작업 220a) 공개 단가 FALLBACK_USD_PER_S × 길이 — 어느 쪽이든 가격 모름이면 (금액, True) 이고
+    상태(priceUnknown) · 원장 항목(priceUnknown) · 경고 로그에 남긴다(조용히 0 을 적지 않는다)."""
     if est.get("rawUsd") is not None:
         return float(est["rawUsd"]), False
     guess = voices.unit_usd(dict(_LAST_PRICE), float(seconds)) if _LAST_PRICE else None
-    return (round(float(guess), 6) if guess is not None else 0.0), True
+    if guess is None:
+        guess = FALLBACK_USD_PER_S * float(seconds)
+    return round(float(guess), 6), True
 
 
 def _source_size(key: str) -> int | None:
@@ -365,8 +371,11 @@ def start(owner: str, pid: str, payload) -> dict:
 
 
 def _resumable(state: dict, key: str) -> bool:
-    """작업 219: 실패 기록이지만 fal 이 받은(돈이 나간) 요청이 남아 있고 같은 원본이면 다시 받을 수 있다(RESUME_MAX 번까지)."""
-    return (state.get("status") == "failed" and state.get("resumable") is True and state.get("sourceKey") == key
+    """작업 219: 실패 기록이지만 fal 이 받은(돈이 나간) 요청이 남아 있고 같은 원본이면 다시 받을 수 있다(RESUME_MAX 번까지).
+    작업 220: 시간 상한을 넘긴 running(그동안 GET 이 없어 실패로 적히지 않았다)도 requestId 가 있으면 다시 내지 않고 이어 본다."""
+    status = state.get("status")
+    stale = status == "running" and _age_s(state.get("startedAt") or "") >= RUN_MAX_S
+    return (((status == "failed" and state.get("resumable") is True) or stale) and state.get("sourceKey") == key
             and bool(_REQUEST_ID_RE.fullmatch(str(state.get("requestId") or ""))) and int(state.get("resumes") or 0) < RESUME_MAX)
 
 
@@ -627,6 +636,8 @@ def export_sources(owner: str, pid: str, clips: list[dict], audio_from: dict, me
                                                   None if entry else (meta.get(origin) or {}).get("duration"))
         sep = found[origin]
         if not sep:
+            if entry and key != lookup:
+                out[key] = dict(entry)  # 작업 220: 파생 원본(정방향 · 속도 1)도 116 대체 소리 그대로 — 215c 계획 뒤 키로 옮긴다
             continue
         if entry:
             offset, scale, end = float(entry["offset"]), float(entry["scale"]), float(entry["end"])

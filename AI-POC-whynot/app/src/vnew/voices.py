@@ -99,6 +99,16 @@ FETCH_TIMEOUT_S = 120
 GAIN_MIN, GAIN_MAX = 0.05, 8.0  # 소리 크기 맞춤 배율 상한(약 −26 dB ~ +18 dB)
 MAX_SPEAKERS = 50
 PRICE_UNKNOWN_LABEL = "가격 확인 불가"
+# 작업 220b: 단가를 못 읽었을 때 원장 추정 단가(오디오 1초당 USD, 모델마다). 이 모듈은 마지막으로 안 단가를 두지 않아 이 값을 쓴다.
+# 출처: fal 공개 가격 페이지(fal.ai/models/<모델 id>)의 오디오 길이 단가 — 셋 중 가장 비싼 ElevenLabs voice-changer 분당 $0.30
+# (= 초당 $0.005)를 보수적으로 셋 다에 쓴다(작업 220b 작성 때 기억한 값, 네트워크 없이 다시 확인하지 못했다).
+# 추정값(ESTIMATE) — 가격 확인 대기 중: fal 가격 페이지에서 세 모델 단가를 확인한 뒤 이 값을 고친다.
+# 화면 견적에는 쓰지 않는다(그대로 "가격 확인 불가").
+FALLBACK_USD_PER_S = {
+    MODEL_HD: 0.005,  # fal.ai/models/resemble-ai/chatterboxhd/speech-to-speech
+    MODEL_ELEVEN: 0.005,  # fal.ai/models/fal-ai/elevenlabs/voice-changer
+    MODEL_LITE: 0.005,  # fal.ai/models/fal-ai/chatterbox/speech-to-speech
+}
 USING_SAVED_LABEL = "저장된 목소리 사용 중"
 NO_PROFILE_LABEL = "목소리 미지정"
 # 이 kind 로 실패하면 남은 줄도 같은 이유로 실패한다 — 더 보내지 않고 원래 소리로 둔다.
@@ -178,10 +188,22 @@ def _price(endpoint: str) -> dict | None:
         return None
 
 
-def _charge(key: str, *, model: str, seconds: float, usd: float, owner: str, pid: str, gen_id: str) -> None:
-    """원장 1건(같은 key 는 한 번만). fal 이 요청을 받은 뒤에만 부른다."""
+def _charge(key: str, *, model: str, seconds: float, usd: float, owner: str, pid: str, gen_id: str,
+            price_unknown: bool = False) -> None:
+    """원장 1건(같은 key 는 한 번만). fal 이 요청을 받은 뒤에만 부른다. 작업 220b: price_unknown 이면 원장 항목 priceUnknown: True
+    (아는 금액이면 예전과 같은 호출 — priceUnknown 칸 없음)."""
     vpoc_ledger.charge(key, kind="audio", model=model, units=round(float(seconds), 3), usd=float(usd), user=owner,
-                       project_id=pid, plan_id=gen_id)
+                       project_id=pid, plan_id=gen_id, **({"price_unknown": True} if price_unknown else {}))
+
+
+def _charge_usd(item: dict, seconds: float) -> tuple[float, bool]:
+    """작업 220b: 원장에 적을 금액과 가격 모름 여부. estimate 가 단가를 알았으면 item["usd"] 그대로 (금액, False).
+    몰랐으면(item["priceUnknown"]) FALLBACK_USD_PER_S[모델] × 보낸 길이 (금액, True) — 조용히 0 을 적지 않는다."""
+    if not item.get("priceUnknown"):
+        return float(item.get("usd") or 0.0), False
+    per_s = float(FALLBACK_USD_PER_S.get(str(item.get("model") or ""), max(FALLBACK_USD_PER_S.values())))
+    usd = per_s * max(0.0, float(seconds))
+    return round(usd if usd > 0 else per_s, 6), True
 
 
 def _sleep(seconds: float) -> None:
@@ -580,7 +602,7 @@ def _confirm(payload: dict, where: str) -> float:
 
 def estimate(items: list[dict]) -> dict:
     """줄마다 금액(보낸 길이 = 패딩 포함) · 합계. 하나라도 단가를 모르면 usd None·priceKnown False·label "가격 확인 불가".
-    item["usd"](원장에 쓸 금액, 모르면 0)를 채운다."""
+    item["usd"](아는 금액, 모르면 0)를 채운다. 작업 220b: 모르면 item["priceUnknown"] = True(원장은 _charge_usd 추정)."""
     prices: dict[str, dict | None] = {}
     total, known, out = 0.0, True, []
     for item in items:
@@ -590,8 +612,10 @@ def estimate(items: list[dict]) -> dict:
         seconds = round(float(item["padEnd"]) - float(item["padStart"]), 3)
         usd = unit_usd(prices[model], seconds)
         item["usd"] = float(usd or 0.0)
+        item.pop("priceUnknown", None)
         if usd is None:
             known = False
+            item["priceUnknown"] = True
         else:
             total += usd
         out.append({"lineId": item["lineId"], "speaker": item["speaker"], "model": model, "seconds": seconds,
@@ -669,10 +693,13 @@ def convert(owner: str, pid: str, gen_id: str, variant: str, item: dict, excerpt
     if not _REQUEST_ID_RE.fullmatch(request_id):
         raise VpocError(where, "NoRequestId", "목소리 모델이 요청 ID를 주지 않았습니다.", 502)
     seconds = round(float(item["padEnd"]) - float(item["padStart"]), 3)
+    usd, unknown = _charge_usd(item, seconds)
     try:
-        _charge("vnew-voice-" + request_id, model=endpoint, seconds=seconds, usd=float(item.get("usd") or 0.0), owner=owner,
-                pid=pid, gen_id=gen_id)
-        charged.append(float(item.get("usd") or 0.0))
+        _charge("vnew-voice-" + request_id, model=endpoint, seconds=seconds, usd=usd, owner=owner, pid=pid, gen_id=gen_id,
+                **({"price_unknown": True} if unknown else {}))
+        charged.append(usd)
+        if unknown:
+            log.warning("vnew.sound.voice_price_unknown pid=%s model=%s usd_estimate=%.6f", pid, endpoint, usd)
     except Exception as exc:  # noqa: BLE001 — 원장 실패는 변환을 막지 않는다(generate 와 같다).
         log.warning("vnew.sound.voice_charge_failed pid=%s err=%s", pid, type(exc).__name__)
     deadline = started + float(wait_s)

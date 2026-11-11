@@ -222,8 +222,9 @@ def check_voice_202() -> bool:
                 fake_out[rid] = body
                 return body
 
-            def fake_charge(key, *, model, seconds, usd, owner, pid, gen_id):
-                charges.append({"key": key, "model": model, "seconds": seconds, "usd": usd, "gen": gen_id})
+            def fake_charge(key, *, model, seconds, usd, owner, pid, gen_id, price_unknown=False):
+                charges.append({"key": key, "model": model, "seconds": seconds, "usd": usd, "gen": gen_id,
+                                "priceUnknown": bool(price_unknown)})
 
             env.set(voices, "_fal_call", fake_fal)
             env.set(voices, "_fetch_audio", fake_fetch)
@@ -402,10 +403,15 @@ def check_voice_202() -> bool:
                 c1 = len(charges)
                 ok_real = client.post(base_url + "/voice-preview", json={"variant": "real", "lineId": "e2", "confirmUsd": 0})
                 payload = (fal["requests"].get(f"req-{fal['posts']}") or {}).get("payload") or {}
+                sent_real = float(((est_real.get("lines") or [{}])[0]).get("seconds") or 0)  # 작업 220b: 보낸 길이(패딩 포함)
+                want_real = round(voices.FALLBACK_USD_PER_S[voices.MODEL_LITE] * sent_real, 6)
                 expect("v-d", [over.status_code, [est_real.get("usd"), est_real.get("priceKnown"), est_real.get("label")], ok_real.status_code,
-                               [c["usd"] for c in charges[c1:]], (fal["requests"].get(f"req-{fal['posts']}") or {}).get("endpoint"), sorted(payload)],
-                       [200, [None, False, "가격 확인 불가"], 200, [0.0], voices.MODEL_LITE, ["source_audio_url", "target_voice_audio_url"]],
-                       "단가를 모르면 '가격 확인 불가'·confirmUsd 0 으로 진행·원장 0 USD 1건(실사만 덮어쓴 Chatterbox)")
+                               [[c["usd"], c["priceUnknown"]] for c in charges[c1:]], want_real > 0,
+                               (fal["requests"].get(f"req-{fal['posts']}") or {}).get("endpoint"), sorted(payload)],
+                       [200, [None, False, "가격 확인 불가"], 200, [[want_real, True]], True, voices.MODEL_LITE,
+                        ["source_audio_url", "target_voice_audio_url"]],
+                       "단가를 모르면 '가격 확인 불가'·confirmUsd 0 으로 진행·원장 1건 = 추정(공개 단가 × 보낸 길이, 0 아님)·priceUnknown"
+                       "(실사만 덮어쓴 Chatterbox, 작업 220b)")
             except Exception as exc:  # noqa: BLE001
                 crash("v-d", exc)
 

@@ -101,6 +101,8 @@ REVISIONS_MAX = 20
 SPLICE_STALL_S = 900
 START_WRITE_TRIES = 4  # 작업 219: 제출이 받아진 뒤 running 쓰기 재시도
 START_WRITE_WAIT_S = 0.25
+ORPHAN_S = float(retake.PREPARE_STALL_S)  # 작업 220: running 인데 retake 상태에 버전이 이만큼 없으면 failed(끝없는 running 방지)
+ORPHAN_TEXT = "다시 만들기 기록을 찾지 못했습니다. 금액을 다시 확인한 뒤 눌러 주세요."
 OUTDATED_TEXT = "목소리 맞춤을 다시 반영해 주세요"
 NO_AUDIO_TEXT = "새 영상에 소리가 없어 그 구간은 원래 소리를 썼습니다. 목소리 맞춤으로 새 대사 목소리를 넣어 주세요."
 TAKE_REDO_TEXT = ("대본에 반영한 대사는 ⑤ [바뀐 테이크만 다시 만들기]로 그 테이크 전체를 다시 만들 수 있습니다. "
@@ -801,6 +803,13 @@ def _refresh(owner: str, pid: str, gen_id: str, variant: str, redo: dict) -> dic
                     job["n"] = version["n"]
                     changed = True
             status = str(version.get("status") or "")
+            started = _parse(job.get("startedAt"))
+            if not version and started and (now - started).total_seconds() > ORPHAN_S:
+                # 작업 220: retake 상태에 이 작업의 버전이 끝내 없다(번호 · 초안 모두) — 아무도 결과를 만들지 않으니 running 에 묶지 않는다
+                job.update(status="failed", error=ORPHAN_TEXT, at=now_iso(), failureKind="orphan", stage="")
+                log.warning("vnew.sound.lines.redo_orphan pid=%s line=%s cell=%s n=%s", pid, line_id, job.get("cellKey"), job.get("n"))
+                changed = True
+                continue
             if status == "completed" and version.get("outputKey"):
                 claim = secrets.token_hex(8)
                 job.update(status="splicing", claim=claim, beatAt=now_iso(), stage="splice", outputKey=str(version["outputKey"]))

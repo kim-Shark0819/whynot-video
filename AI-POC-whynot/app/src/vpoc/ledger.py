@@ -61,10 +61,12 @@ def charge(
     plan_id: str = "",
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    price_unknown: bool = False,
 ) -> dict:
     """같은 key 는 한 번만 계상한다. 실패한 Luma 작업도 계상한다(보수적).
 
     토큰은 admin 모델 관리의 "영상 비용·토큰"이 읽는다(2026-10-07). 모르면 넣지 않는다.
+    price_unknown(작업 220a): 단가를 읽지 못해 usd 가 추정이면 항목에 "priceUnknown": True 를 넣는다. 아니면 칸이 없다.
     """
     entry = {
         "key": key,
@@ -81,6 +83,8 @@ def charge(
         entry["inputTokens"] = int(input_tokens)
     if output_tokens is not None:
         entry["outputTokens"] = int(output_tokens)
+    if price_unknown:
+        entry["priceUnknown"] = True
     with _LOCK:
         for _ in range(4):
             data, etag = read()
