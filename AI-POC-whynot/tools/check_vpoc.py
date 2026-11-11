@@ -19492,7 +19492,7 @@ def check_vnew_fx() -> None:
            사용자 컷 그대로), run_conti·run_fx_fill 통합(맥락 컷이 센 한도로 추천을 뺀다)
     (fx-e) update_conti: 기호만 바뀜 → 승인 유지·revision +1, moodKo 바뀜 → moodEn 비움, 그 밖 → 승인 해제, fxSuggest 키를 만들지
            않음, 끔 → 원본 그대로·늘 해제(옛 알고리즘으로 만든 기대값과 같다)
-    (fx-f) run_conti: vnew.conti.fx 1회(SYSTEM·도구·8000·ANALYZE_MODEL), 이미지 20장·"Panel N" = 대본 타일 번호(50→40 균등 선택 뒤),
+    (fx-f) run_conti: vnew.conti.fx 1회(SYSTEM·도구·VNEW_LONG_JSON_MAX_TOKENS(225)·ANALYZE_MODEL), 이미지 20장·"Panel N" = 대본 타일 번호(50→40 균등 선택 뒤),
            컷 필드·fxFill 이 콘티와 같은 저장, 원장 2건, 실패 → 콘티 저장·fxFill failed·task done, 끔 → 호출 0·fxFill 없음·저장 횟수 같음
     (fx-g) POST /conti/fx: 202·targets·translate, 409 TaskRunning·NothingToFill·ContiNotReady, 404 끔, 403 권한, 스레드 합치기·승인 유지·
            revision 그대로, 번역만이면 이미지·타일 0, 원장 1건/호출, 취소 → 버림, 멈춤 → failed, 실패 문구, plan_view features·fxFill
@@ -19928,8 +19928,8 @@ def check_vnew_fx() -> None:
             else:
                 call = fx_calls[0]
                 if call.get("system_text") != vprompts.FX_SYSTEM or call.get("tool") is not vprompts.EMIT_FX \
-                        or call.get("max_tokens") != 8000 or call.get("model") != vpoc_settings.ANALYZE_MODEL:
-                    bad.append("(fx-f) 채우기 호출의 SYSTEM·도구·max_tokens 8000·ANALYZE_MODEL 이 다릅니다")
+                        or call.get("max_tokens") != vset.VNEW_LONG_JSON_MAX_TOKENS or call.get("model") != vpoc_settings.ANALYZE_MODEL:  # 225
+                    bad.append("(fx-f) 채우기 호출의 SYSTEM·도구·max_tokens VNEW_LONG_JSON_MAX_TOKENS·ANALYZE_MODEL 이 다릅니다")  # 225
                 blocks_f = call.get("blocks") or []
                 text_f = str((blocks_f[0] if blocks_f else {}).get("text") or "")
                 images = [(blocks_f[i - 1].get("text"), b["image"]["source"]["bytes"]) for i, b in enumerate(blocks_f) if "image" in b]
@@ -55068,7 +55068,8 @@ def check_vnew_vibe_conti_158() -> None:
         # 같아야 한다(호출 인자·블록·저장 콘티는 그대로 — 이 검사 인물에는 옷 메모가 없다). 기대값 _VB158_OFF_SHA 는 바꾸지 않았다.
         rule13 = "13. Hands: " + prmod.HAND_OWNER_RULE + " " + prmod.HAND_OWNER_CONTI_RULE + "\n"
         system_162 = prmod.CONTI_SYSTEM
-        with _pin_vnew(VNEW_VIBE_CONTI=False):
+        # 작업 225: sha 는 호출 인자 max_tokens(콘티 · 기호)를 담는다. 158 전 값은 8000 으로 쟀으므로 예산만 8000 으로 고정해 잰다.
+        with _pin_vnew(VNEW_VIBE_CONTI=False, VNEW_LONG_JSON_MAX_TOKENS=8000):  # 225
             try:
                 prmod.CONTI_SYSTEM = system_162.replace(rule13, "")
                 off_digest = _vb158_off_digest()
@@ -68902,6 +68903,7 @@ def main() -> int:
     if not __import__("check_anime_prompt_222").check_anime_prompt_222(): fail("작업 222: 애니 자막 금지 · 눈동자 줄 검사 실패")
     if not __import__("check_bg_harmony_223").check_bg_harmony_223(): fail("작업 223: 배경 줄 · 샷 빛 맞춤 · 조화 문장 · 장소 뷰 화풍 검사 실패")
     if not __import__("check_line_download_224").check_line_download_224(): fail("작업 224: ⑥ 대사별 내려받기 검사 실패")
+    if not __import__("check_long_json_225").check_long_json_225(): fail("작업 225: 긴 JSON 호출 출력 예산(VNEW_LONG_JSON_MAX_TOKENS) 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

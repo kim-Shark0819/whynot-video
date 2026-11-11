@@ -435,7 +435,7 @@ def _design(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=_DESIGN_SYSTEM,
         blocks=blocks,
         tool=_DESIGN_TOOL,
-        max_tokens=8000,
+        max_tokens=vnew_settings.VNEW_LONG_JSON_MAX_TOKENS,  # 225
         where="vnew.previz.design",
         model=model,
     )
