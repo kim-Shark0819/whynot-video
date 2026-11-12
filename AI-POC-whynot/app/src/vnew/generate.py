@@ -16778,10 +16778,45 @@ def _retake_charge_usd(info: dict) -> tuple[float, bool]:
     return (usd if usd > 0 else RETAKE_FALLBACK_USD_PER_S), True
 
 
+_RETAKE_IMAGE_NO_RE = re.compile(r"(?:@Image|\bImage )(\d{1,2})(?!\d)")
+
+
+def _retake_panel_nos(built) -> list[int]:
+    """작업 232: payload 의 원작 웹툰 패널 그림 번호(_segment_panel_jpegs — panelNos, 보낸 imageUrls 안만). 실사 · 영상 편집 경로는 []."""
+    built = built if isinstance(built, dict) else {}
+    count = len(built.get("imageUrls") or [])
+    out: list[int] = []
+    for no in built.get("panelNos") or []:
+        try:
+            value = int(no)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= value <= count and value not in out:
+            out.append(value)
+    return out
+
+
+def _retake_without_panels(built: dict, panels: list[int], drop_panels: list, prompt: str) -> dict:
+    """작업 232: built 에서 원작 패널 그림(panels)만 뺀 사본. elements · 다른 그림 순서는 그대로.
+    호출한 쪽이 뺀 번호(drop_panels)와 payload 의 패널 번호가 다르거나, 프롬프트 @Image 번호가 남은 그림 수를 넘으면 RetakeFormatChanged."""
+    try:
+        wanted = [int(n) for n in drop_panels]
+    except (TypeError, ValueError):
+        wanted = []
+    if not panels or sorted(wanted) != sorted(panels):
+        raise VpocError("vnew.retake", "RetakeFormatChanged", RETAKE_FORMAT_CHANGED_TEXT, 409)
+    gone = set(panels)
+    images = [image for no, image in enumerate(built.get("imageUrls") or [], 1) if no not in gone]
+    used = [int(m.group(1)) for m in _RETAKE_IMAGE_NO_RE.finditer(str(prompt or ""))]
+    if any(no < 1 or no > len(images) for no in used):
+        raise VpocError("vnew.retake", "RetakeFormatChanged", RETAKE_FORMAT_CHANGED_TEXT, 409)
+    return {**built, "imageUrls": images, "panelNos": []}
+
+
 def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: str, prompt: str, tag: str, model: str,
                    attempt: int = 1, version=None, span: dict | None = None, cut_ids: list | None = None,
                    expect_refs: list | None = None, source_key: str = "", source_span: tuple | None = None,
-                   source_segments: list | None = None) -> dict:
+                   source_segments: list | None = None, drop_panels: list | None = None, panel_out: list | None = None) -> dict:
     """⑦ AI로 고치기 새 길(design D22): 고른 모델·범위로 칸 하나를 제출한다. 칸 상태(gen.units)는 읽기만 한다.
 
     span = {start, end}(칸 녹화 시간, None 이면 원본 칸 전체), cut_ids = 구간 안 컷, expect_refs = 초안 본보기의 참고 표시(다르면 제출하지 않는다).
@@ -16790,6 +16825,9 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     (_retake_result_video)이고 길이·견적은 out − in 초다. 없으면 지금처럼 프리비즈 녹화(_retake_video). 참고 이미지는 span·cut_ids 그대로.
     작업 194: source_segments [(키, in, out)](같은 칸 원본·버전 파일, 타임라인 순서)를 주면 @Video1 = 조각을 이은 것(_retake_segments_video),
     길이·견적·원장 = 조각 길이 합. 기록 params videoSource result · sourceSegments.
+    작업 232: panel_out(list)을 주면 payload 의 원작 패널 그림 번호(panelNos — 보낸 imageUrls 안)를 담는다(제출 전, 거절돼도).
+    drop_panels(그 번호들)를 주면 그 그림만 빼고 낸다(인물 시트 · 장소 · @Video1 그대로, 프롬프트는 호출한 쪽이 이미 고친 것).
+    payload 의 패널 번호가 다르거나 프롬프트 @Image 번호가 남은 그림 수를 넘으면 RetakeFormatChanged(제출 0).
     반환 {invocationArn, outputPrefix, provider, usd, logId, sentSeconds, trimTo}.
     """
     plan, _ = plan_mod.load_plan(owner, pid)
@@ -16850,12 +16888,19 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
             video, meta, video_keys = _retake_video(cell, kind=kind, path=path, span=span, pad_to=pad_to)
         with _RefTrace() as trace:
             built = _retake_payload(owner, pid, plan, like, path=path, caps=caps, variant=variant)
-        refs = trace.refs(built)
+        panels = _retake_panel_nos(built)
+        if panel_out is not None:
+            panel_out[:] = panels  # 작업 232
         if expect_refs is not None:
             from . import retake as vnew_retake  # noqa: PLC0415 — retake 가 generate 를 import 한다(순환 피함).
 
             if vnew_retake._refs(str(built.get("prompt") or "")) != {str(r) for r in expect_refs}:  # noqa: SLF001
                 raise VpocError("vnew.retake", "RetakeFormatChanged", RETAKE_FORMAT_CHANGED_TEXT, 409)
+        if drop_panels is not None:  # 작업 232: 콘텐츠 검사 셋째 시도 — 원작 패널 그림만 뺀다
+            built = _retake_without_panels(built, panels, drop_panels, prompt)
+            log.info("vnew.gen.resubmit_model_drop_panels pid=%s cell=%s variant=%s tag=%s attempt=%d panels=%d images=%d", pid, cell_id,
+                     variant, tag, attempt, len(panels), len(built.get("imageUrls") or []))
+        refs = trace.refs(built)
         if path == "take":
             result = _submit_take(endpoint=model, caps=caps, video_mp4=video, prompt=prompt, output_prefix=prefix,
                                   image_urls=built["imageUrls"], seconds=float(info["sentSeconds"]), resolution=info["resolutionValue"],

@@ -68916,6 +68916,7 @@ def main() -> int:
     if not __import__("check_anime_kling_229").check_anime_kling_229(): fail("작업 229: 애니 테이크 조각 모든 모델 거절 → Kling O3 컷 단위 검사 실패")
     if not __import__("check_real_tod_230").check_real_tod_230(): fail("작업 230: 실사 시간대 부정 낱말 · 우선순위 · 죽은 Seedance 건너뛰기 검사 실패")
     if not __import__("check_previz_nogate_231").check_previz_nogate_231(): fail("작업 231: 프리비즈 일치도 관문 끔(0%도 승인) · 안내만 검사 실패")
+    if not __import__("check_retake_droprefs_232").check_retake_droprefs_232(): fail("작업 232: ⑦ 콘텐츠 검사 순화도 거절 → 원작 패널 없이 1번 더 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

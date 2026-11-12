@@ -41,6 +41,9 @@ range.in~out(edit._audio_sources — material_items 가 videoSource·fromKey 를
 "contentFlag". 처음 거절이면 같은 번호 attempt + 1 로 1번만 다시 낸다(11절 _soft_prompt — 이전 프롬프트(CONTEXT) 부분의 대사 줄을 빼고 본 생성의
 순화 지도로 고친다, EDIT·RANGE·참고 표시는 그대로). 또 거절이면 CONTENT_FLAG_TEXT 로 failed. 원장은 본 생성과 같다(실제로 받아 준 제출마다
 1번 — 제출 자체가 거절되면 0).
+작업 232: 순화한 것도 거절이고 원작 웹툰 패널 그림(_segment_panel_jpegs — 버전 panelRefs)이 참고에 든 애니 다시 만들기는 같은 번호 attempt + 1 로
+1번 더 낸다(_drop_panel_retry — 순화한 프롬프트에서 패널 참고만 빼고 @Image 번호를 당김, 그림은 generate.resubmit_model drop_panels 가 뺀다,
+버전 contentDropRefs). 또 거절이면 CONTENT_DROP_FAILED_TEXT. 실사 · 패널 없음 · compose 는 지금 그대로.
 """
 
 from __future__ import annotations
@@ -131,6 +134,9 @@ CONTENT_FLAG_KIND = generate.CONTENT_FLAG_KIND
 CONTENT_RETRY_TEXT = "영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도하는 중입니다."
 CONTENT_FLAG_TEXT = ("영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도했지만 거절됐습니다. "
                      "키스·노출·거친 대사가 있는 컷을 빼고 다시 골라 보세요.")
+# 작업 232: 순화한 것도 거절된 애니 다시 만들기(원작 패널 그림이 참고에 든 것)는 그 그림만 빼고 같은 번호로 1번 더 낸다.
+CONTENT_DROP_TEXT = "콘텐츠 검사에서 다시 거절돼, 원작 패널 그림을 빼고 한 번 더 시도하는 중입니다."
+CONTENT_DROP_FAILED_TEXT = CONTENT_FLAG_TEXT + " 원작 패널 없이도 거절됐습니다."
 URL_TEXT = "[주소 생략]"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -1173,7 +1179,8 @@ def _version_out(target: dict, version: dict) -> dict:
         "finishedAt": version.get("finishedAt") or "",
         "timedOut": _timed_out(version), "recovering": _recoverable(version, datetime.now(timezone.utc)),  # 보완 4
         # 작업 195: 콘텐츠 검사 거절 뒤 순화해 다시 내는 중이면 그 안내(끝나면 "" — 실패 문구는 error)
-        "contentNote": CONTENT_RETRY_TEXT if version.get("contentRetry") and version.get("status") in _LIVE else "",
+        "contentNote": (CONTENT_DROP_TEXT if version.get("contentDropRefs") else CONTENT_RETRY_TEXT)
+        if (version.get("contentRetry") or version.get("contentDropRefs")) and version.get("status") in _LIVE else "",  # 작업 232
     }
 
 
@@ -1846,6 +1853,8 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
         for stale in ("segments", "audioSegments", "audioStitched"):  # 작업 194: 지난 시도의 조각·소리 기록도(pick·완료가 다시 단다)
             version.pop(stale, None)
         version.pop("contentRetry", None)  # 작업 195: 사용자가 다시 내면 자동 순화 1번을 다시 쓸 수 있다
+        version.pop("contentDropRefs", None)  # 작업 232: 패널 빼고 다시 내기 1번도(패널 번호는 제출이 다시 단다)
+        version.pop("panelRefs", None)
         version.update(pick["version"])  # 보완 1: 고른 모델·범위·구간·형식·길이
         box.update(n=version["n"], attempt=attempt)
         return data
@@ -1927,7 +1936,8 @@ def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) 
                 real = {"sentSeconds": sent["sentSeconds"]} if version.get("videoSource") == RESULT_SOURCE and \
                     sent.get("sentSeconds") is not None else {}  # 작업 191 fix1: 실제로 보낸 @Video1 길이(채움 포함)
                 version = _beat(owner, pid, gen_id, key, n, claim, status="submitted", invocationArn=sent["invocationArn"],
-                                outputPrefix=sent["outputPrefix"], submittedAt=now_iso(), logId=sent.get("logId") or "", **real)
+                                outputPrefix=sent["outputPrefix"], submittedAt=now_iso(), logId=sent.get("logId") or "", **real,
+                                **_panel_fields(version))  # 작업 232: _resubmit 이 단 원작 패널 번호
                 log.info("vnew.retake.submitted pid=%s gen=%s cell=%s n=%d attempt=%s", pid, gen_id, key, n, version.get("attempt"))
             stage = "poll"
             version = _poll_until_done(owner, pid, gen_id, key, n, claim, version)  # 작업 195: 순화해 다시 낼 버전이면 dict
@@ -2804,11 +2814,19 @@ def _resubmit(owner: str, pid: str, gen_id: str, variant: str, cell_id: str, n: 
             raise VpocError("vnew.retake", "RetakeBadRange", BAD_RANGE_TEXT, 400)
         else:
             source = {"source_key": str(version["fromKey"]), "source_span": (float(rng["in"]), float(rng["out"]))}
-    return generate.resubmit_model(owner, pid, gen_id, variant=variant, cell_id=cell_id, prompt=prompt, tag=f"rt{n}",
-                                   model=str(version.get("model") or ""), attempt=attempt, version=n,
-                                   span={"start": float(rng["start"]), "end": float(rng["end"])} if rng else None,
-                                   cut_ids=_version_cuts(version) or None,
-                                   expect_refs=[str(r) for r in refs] if isinstance(refs, list) else None, **source)
+    panels: list[int] = []
+    if not source and version.get("contentDropRefs"):  # 작업 232: 셋째 시도 — 원작 패널 그림만 빼고(프롬프트는 _content_flag 가 고침)
+        source = {"drop_panels": [int(p) for p in version.get("panelRefs") or []]}
+    try:
+        return generate.resubmit_model(owner, pid, gen_id, variant=variant, cell_id=cell_id, prompt=prompt, tag=f"rt{n}",
+                                       model=str(version.get("model") or ""), attempt=attempt, version=n,
+                                       span={"start": float(rng["start"]), "end": float(rng["end"])} if rng else None,
+                                       cut_ids=_version_cuts(version) or None,
+                                       expect_refs=[str(r) for r in refs] if isinstance(refs, list) else None,
+                                       panel_out=panels, **source)
+    finally:
+        if panels and not version.get("videoSource"):  # 작업 232: 원작 패널 번호(제출 전 — 제출 자체가 거절돼도). compose(result)는 안 단다
+            version["panelRefs"] = list(panels)
 
 
 
@@ -3633,8 +3651,19 @@ def _soft_prompt(prompt: str) -> tuple[str, dict]:
 def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict, message: str = "") -> dict | None:
     """작업 195: 콘텐츠 검사 거절. 순화해 다시 낸 시도(contentRetry)였으면 CONTENT_FLAG_TEXT 로 failed(None), 처음이면 같은 버전을
     queued · attempt + 1 · 순화한 프롬프트 · failureKind contentFlag · contentRetry 로 두고 그 버전을 돌려준다(run_retake 가 바로 다시 낸다).
-    작업 198: 거절마다 모델 노트 1줄(message = 공급자 원문) — 처음은 action softRetry, 순화한 것도 거절이면 _finish 가 gaveUp."""
+    작업 198: 거절마다 모델 노트 1줄(message = 공급자 원문) — 처음은 action softRetry, 순화한 것도 거절이면 _finish 가 gaveUp.
+    작업 232: 순화한 것도 거절이고 원작 패널 그림이 참고에 든 애니 다시 만들기(_drop_panel_retry)면 같은 버전을 queued · attempt + 1 ·
+    순화한 프롬프트에서 패널 참고만 뺀 것 · contentDropRefs 로 두고 돌려준다(노트 action dropRefs). 그것도 거절이면 CONTENT_DROP_FAILED_TEXT."""
+    if version.get("contentDropRefs"):  # 작업 232: 패널 없이 낸 셋째도 거절
+        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=CONTENT_DROP_FAILED_TEXT, failureKind=CONTENT_FLAG_KIND,
+                provider_message=message)
+        log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s step=failed_no_panels", pid, gen_id, key, n,
+                    version.get("attempt"))
+        return None
     if version.get("contentRetry"):
+        dropped = _drop_panel_retry(key, version)
+        if dropped is not None:
+            return _content_drop_panels(owner, pid, gen_id, key, n, claim, version, dropped, message)
         _finish(owner, pid, gen_id, key, n, claim, status="failed", error=CONTENT_FLAG_TEXT, failureKind=CONTENT_FLAG_KIND,
                 provider_message=message)
         log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s step=failed", pid, gen_id, key, n,
@@ -3646,11 +3675,142 @@ def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: st
     attempt = int(version.get("attempt") or 1) + 1
     out = _beat(owner, pid, gen_id, key, n, claim, status="queued", attempt=attempt, prompt=prompt, promptBytes=_bytes_of(prompt),
                 invocationArn="", outputPrefix="", outputKey="", submittedAt="", logId="", error="", failureKind=CONTENT_FLAG_KIND,
-                contentRetry={"fromAttempt": attempt - 1, "at": now_iso(), **info})
+                contentRetry={"fromAttempt": attempt - 1, "at": now_iso(), **info}, **_panel_fields(version))
     _note_version(owner, pid, gen_id, key, version, message, kind=CONTENT_FLAG_KIND, action="softRetry")  # 거절된 시도(attempt - 1)
     log.info("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%d step=soften bytes=%d dropped_lines=%d dropped_pieces=%d "
              "softened=%d", pid, gen_id, key, n, attempt, _bytes_of(prompt), info["droppedLines"], info["droppedPieces"],
              info["softenedLines"])
+    return out
+
+
+# ================================================================ 작업 232: 순화도 거절 → 원작 패널 그림 없이 1번 더
+#
+# fal 콘텐츠 검사는 글만이 아니라 그림도 읽는다. 애니 테이크 다시 만들기(참고 영상 경로)는 _take_payload 가 그 테이크의 원작 웹툰 패널
+# (_segment_panel_jpegs — 키스 컷이면 키스 패널)을 그림체 참고로 넣는다. 195 순화 다시 내기도 거절이면 같은 번호 attempt + 1 로 1번 더:
+# 순화한 프롬프트 그대로에서 패널 참고 표시만 빼고(이름표 조각 · 줄, 다른 문장 안의 표시) 남은 @Image 번호를 당겨 보낸 그림과 맞춘다
+# (본 생성 4단계 dropRefs 처럼 번호가 늘 1..그림 수). 인물 시트 · 장소 · @Video1 · elements 는 그대로, 그림은 generate.resubmit_model
+# (drop_panels)이 뺀다. 실사(패널 없음) · 패널 참고가 없는 것 · compose(result · EDIT 줄)는 지금 그대로(순화 다시 내기 뒤 failed).
+# 원장 · 견적은 지금 규칙 그대로(받아 준 제출마다 1번, 버전 usd 그대로).
+
+_PANEL_TAG = r"(?:@Image|\bImage )(\d{1,2})(?!\d)"
+_PANEL_RUN_RE = re.compile(_PANEL_TAG + r"(?:[ \t]*[\u2013\u2014-][ \t]*" + _PANEL_TAG + r")?")
+_PANEL_LIST_RE = re.compile(r"[ \t]*" + _PANEL_RUN_RE.pattern + r"(?:[ \t]*(?:,|\band\b|&)[ \t]*" + _PANEL_RUN_RE.pattern + r")*")
+_IMAGE_NO_RE = re.compile(r"(@Image|\bImage )(\d{1,2})(?!\d)")
+_CLAUSE_SEP_RE = re.compile(r"(;[ \t]+|(?<=[.!?])[ \t]+)")
+
+
+def _panel_fields(version: dict) -> dict:
+    """작업 232: 버전에 남길 원작 패널 번호(_resubmit 이 제출 전에 단 것). 없으면 {}(지금 버전 꼴 그대로)."""
+    panels = (version or {}).get("panelRefs")
+    return {"panelRefs": list(panels)} if isinstance(panels, list) and panels else {}
+
+
+def _run_numbers(match: re.Match) -> set[int]:
+    nums = [int(g) for g in match.groups() if g]
+    return set(range(min(nums), max(nums) + 1)) if nums else set()
+
+
+def _strip_panel_runs(text: str, gone: set[int]) -> str | None:
+    """문장 안의 패널 표시(@Image4–@Image6 · @Image4, @Image5 · Image 4)만 뺀다. 패널과 다른 그림이 한 표시에 섞이면 None."""
+    mixed: list[bool] = []
+
+    def repl(match: re.Match) -> str:
+        nums: set[int] = set()
+        for run in _PANEL_RUN_RE.finditer(match.group(0)):
+            nums |= _run_numbers(run)
+        if not nums & gone:
+            return match.group(0)
+        if not nums <= gone:
+            mixed.append(True)
+            return match.group(0)
+        return ""
+
+    result = _PANEL_LIST_RE.sub(repl, text)
+    if mixed:
+        return None
+    result = re.sub(r"\([ \t]*\)", "", result)
+    result = re.sub(r"[ \t]{2,}", " ", result)
+    return re.sub(r"[ \t]+([:;,.!?)])", r"\1", result)
+
+
+def _drop_panel_prompt(prompt: str, panels) -> str | None:
+    """작업 232: 프롬프트에서 원작 패널 그림(panels = @Image 번호) 참고만 뺀다. 못 빼면 None(지금처럼 failed).
+
+    줄마다(이름 머리 "LABEL:" 은 둔다) '; ' · 문장 경계로 조각을 나눠, 패널 표시로 시작하고 패널 표시만 든 조각(이름표 "@Image4–@Image6 are the
+    uploaded webtoon images …", 패널 정의 줄)은 통째로 빼고(끝 문장부호는 앞 조각으로), 다른 조각 안의 패널 표시는 표시만 뺀다. 빈 줄이 되면
+    줄을 뺀다. 그다음 남은 @Image · Image N 번호를 뺀 그림만큼 당긴다(1..남은 그림 수). 다른 글은 그대로다."""
+    try:
+        gone = {int(p) for p in panels or []}
+    except (TypeError, ValueError):
+        return None
+    if not gone:
+        return None
+    out_lines: list[str] = []
+    for line in _normalize_prompt(prompt).split("\n"):
+        if not any(_run_numbers(m) & gone for m in _PANEL_RUN_RE.finditer(line)):
+            out_lines.append(line)
+            continue
+        head_match = _LABEL_RE.match(line)
+        head = line[:head_match.end()] if head_match else ""
+        parts = _CLAUSE_SEP_RE.split(line[len(head):])
+        clauses, seps = parts[0::2], parts[1::2]
+        kept: list[list[str]] = []  # [조각, 앞 구분]
+        for at, clause in enumerate(clauses):
+            sep = seps[at - 1] if at else ""
+            body = clause.strip()
+            runs = list(_PANEL_RUN_RE.finditer(body))
+            nums: set[int] = set().union(*[_run_numbers(m) for m in runs]) if runs else set()
+            if runs and runs[0].start() == 0 and nums & gone and nums <= gone:
+                tail = body[-1] if body and body[-1] in ".!?" else ""
+                if tail and kept and kept[-1][0].rstrip() and kept[-1][0].rstrip()[-1] not in ".!?":
+                    kept[-1][0] = kept[-1][0].rstrip() + tail
+                continue
+            fixed = _strip_panel_runs(clause, gone)
+            if fixed is None:
+                return None
+            kept.append([fixed, sep])
+        text = "".join((sep if at else "") + clause for at, (clause, sep) in enumerate(kept))
+        if not kept and head:
+            continue
+        if not text.strip(" \t;,.:"):
+            continue
+        if head and not text.startswith((" ", "\t")):
+            text = " " + text.lstrip()
+        out_lines.append(head + text if head else text.lstrip())
+
+    def renumber(match: re.Match) -> str:
+        number = int(match.group(2))
+        return f"{match.group(1)}{number - sum(1 for g in gone if g < number)}"
+
+    out = _IMAGE_NO_RE.sub(renumber, "\n".join(out_lines))
+    return out if out.strip() else None
+
+
+def _drop_panel_retry(key: str, version: dict) -> str | None:
+    """작업 232: 순화한 것도 거절된 버전이 패널 빼고 1번 더 낼 대상이면 그 프롬프트, 아니면 None.
+    대상 = 애니(실사 아님) · 새 길(format template) · compose 아님(videoSource result · EDIT 줄 없음) · 원작 패널 번호(panelRefs)가 있음."""
+    if str(key).partition(":")[0] == "real" or version.get("format") != "template" or version.get("videoSource"):
+        return None
+    panels = version.get("panelRefs")
+    if not isinstance(panels, list) or not panels:
+        return None
+    prompt = str(version.get("prompt") or "")
+    if any(_label_of(line) == "EDIT" for line in prompt.split("\n")):
+        return None
+    out = _drop_panel_prompt(prompt, panels)
+    return out if out and out != _normalize_prompt(prompt) else None
+
+
+def _content_drop_panels(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict, prompt: str,
+                         message: str) -> dict:
+    """작업 232: 같은 버전을 queued · attempt + 1 · 패널 참고를 뺀 프롬프트 · contentDropRefs 로 두고 돌려준다(run_retake 가 바로 다시 낸다)."""
+    attempt = int(version.get("attempt") or 1) + 1
+    out = _beat(owner, pid, gen_id, key, n, claim, status="queued", attempt=attempt, prompt=prompt, promptBytes=_bytes_of(prompt),
+                invocationArn="", outputPrefix="", outputKey="", submittedAt="", logId="", error="", failureKind=CONTENT_FLAG_KIND,
+                contentDropRefs=True, **_panel_fields(version))
+    _note_version(owner, pid, gen_id, key, version, message, kind=CONTENT_FLAG_KIND, action="dropRefs")  # 거절된 시도(attempt - 1)
+    log.info("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%d step=drop_panels panels=%d bytes=%d", pid, gen_id, key, n,
+             attempt, len(version.get("panelRefs") or []), _bytes_of(prompt))
     return out
 
 
