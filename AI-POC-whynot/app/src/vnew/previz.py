@@ -3004,6 +3004,7 @@ def approve(owner: str, pid: str, *, force: bool = False) -> dict:
     모든 컷의 fit.match ≥ APPROVE_MIN_MATCH(기본 0.7)가 아니면 409 LowMatch. match null(판정 불가)
     컷도 낮은 컷으로 센다. force=True 면 낮은 컷이 있어도 승인하고 previz["approvedForced"]={at,lowCuts}
     를 기록한다.
+    작업 231: VNEW_PREVIZ_MATCH_GATE 가 false(기본)면 409 없이 승인하고 낮은 컷이 있으면 같은 기록을 남긴다.
     """
     from . import plan as plan_mod  # noqa: PLC0415
 
@@ -3016,7 +3017,8 @@ def approve(owner: str, pid: str, *, force: bool = False) -> dict:
         low = _low_match_cuts(previz)
         # 이미 [그래도 승인]으로 승인된 장면을 다시 승인(녹화 다시 시작)하면 그대로 통과한다.
         again = bool(previz.get("approved") and previz.get("approvedForced"))
-        if low and not (force or again):
+        # 작업 231: 관문이 꺼져 있으면(기본) 낮은 컷이 있어도 막지 않는다 — 아래에서 approvedForced 로 기록만 한다.
+        if low and not (force or again) and vnew_settings.VNEW_PREVIZ_MATCH_GATE:
             raise VpocError("vnew.previz.approve", "LowMatch", _low_cut_message(low), 409)
         previz["approved"] = True
         if low:
@@ -3430,6 +3432,7 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "grammarOverrides": previz.get("grammarOverrides") or {},
         "fit": previz.get("fit") or {},
         "approveMinMatch": APPROVE_MIN_MATCH,
+        "matchGate": bool(vnew_settings.VNEW_PREVIZ_MATCH_GATE),  # 작업 231: false 면 낮은 컷도 승인(안내만)
         "lowMatchCuts": _low_match_cuts(previz),
         "approvedForced": previz.get("approvedForced"),
         "totalSeconds": previz_schema.scenes_total_seconds(previz.get("scenes") or []),
