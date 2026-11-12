@@ -68917,6 +68917,7 @@ def main() -> int:
     if not __import__("check_real_tod_230").check_real_tod_230(): fail("작업 230: 실사 시간대 부정 낱말 · 우선순위 · 죽은 Seedance 건너뛰기 검사 실패")
     if not __import__("check_previz_nogate_231").check_previz_nogate_231(): fail("작업 231: 프리비즈 일치도 관문 끔(0%도 승인) · 안내만 검사 실패")
     if not __import__("check_retake_droprefs_232").check_retake_droprefs_232(): fail("작업 232: ⑦ 콘텐츠 검사 순화도 거절 → 원작 패널 없이 1번 더 검사 실패")
+    if not __import__("check_intimacy_neutral_233").check_intimacy_neutral_233(): fail("작업 233: 콘텐츠 검사 다시 내기 입맞춤 글 중립 연출 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

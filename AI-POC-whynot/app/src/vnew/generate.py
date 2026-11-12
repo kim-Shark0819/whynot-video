@@ -52,6 +52,7 @@ from . import fx as vnew_fx
 from . import imaging
 # 작업 198: 모델 거절·오류 노트(한 곳). model_notes 는 generate 를 함수 안에서만 import 한다.
 from . import model_notes as vnew_model_notes
+from . import neutral_wording as vnew_neutral  # 작업 233: 다시 내기 입맞춤 글 → 중립 연출(generate 를 import 하지 않는다)
 from . import plan as plan_mod
 from . import previz_schema
 from . import settings as vnew_settings
@@ -7312,6 +7313,8 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
             kwargs["lines_fix"] = lines_fix
     audit: dict = {}
     prompt = _vibe_take_prompt(prompt_plan, take, audit=audit, **kwargs)
+    if _strong(soften):
+        prompt = _intimacy_neutral(prompt)  # 작업 233: 센 순화(3단계 이상)는 입맞춤 · 입술 · 신음 글도 중립 연출로
 
     def probe(sub_take: dict) -> dict:
         result: dict = {}
@@ -7494,6 +7497,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     audit: dict = {}
     prompt = _take_prompt(prompt_plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps,
                           audit=audit, **prompt_kwargs)
+    if _strong(soften):
+        prompt = _intimacy_neutral(prompt)  # 작업 233: 센 순화(3단계 이상)는 입맞춤 · 입술 · 신음 글도 중립 연출로
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
 
@@ -8637,6 +8642,12 @@ def _contact_neutral(text: str) -> str:
     out = re.sub(r"([,;])(?=[,.;])", "", out)
     out = re.sub(r"\.(?:\s*\.)+", ".", out)
     return out.strip()
+
+
+def _intimacy_neutral(text: str) -> str:
+    """작업 233: 입맞춤 · 입술 · 신음 글 → 중립 연출(neutral_wording.intimacy_neutral — LLM 없음, 결정적, 두 번 써도 같다).
+    콘텐츠 사다리 센 순화(3단계 이상) 테이크 프롬프트와 ⑦ 195 순화 다시 내기(retake._soft_line)만 쓴다. 처음 제출은 그대로."""
+    return vnew_neutral.intimacy_neutral(text)
 
 
 _LINES_SYSTEM = (
