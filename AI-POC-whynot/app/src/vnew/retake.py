@@ -3579,8 +3579,8 @@ def _drop_spoken(line: str) -> tuple[str, int]:
 
 
 def _soft_line(line: str) -> str:
-    """본 생성 순화 지도(작업 153 · 163 센 순화 · 168 닿는 연기 중립 낱말). 바뀔 말이 없으면 같은 글자."""
-    return generate._contact_neutral(generate._soften_text(line, True))  # noqa: SLF001
+    """본 생성 순화 지도(작업 153 · 163 센 순화 · 168 닿는 연기 중립 낱말) 뒤 작업 233 입맞춤 글 중립 연출. 바뀔 말이 없으면 같은 글자."""
+    return generate._intimacy_neutral(generate._contact_neutral(generate._soften_text(line, True)))  # noqa: SLF001
 
 
 def _silent_audio(lines: list[str], had_rule: bool, at: int) -> tuple[list[str], bool]:
@@ -3608,12 +3608,14 @@ def _soft_prompt(prompt: str) -> tuple[str, dict]:
     lead = 1 if lines and _is_ip_notice(lines[0]) else 0  # 작업 214: 맨 앞 고지 줄(순화 · 빼기 · 소리 규칙 자리 밖)
     full: list[str] = []
     plain: list[str] = []
+    plain_n: list[str] = []  # 작업 233: 빼기 + 입맞춤 글 중립 연출만(순화 지도 없음) — 순화한 것이 처음 바이트를 넘을 때 먼저 쓴다
     info = {"droppedLines": 0, "droppedPieces": 0, "softenedLines": 0}
     for at, line in enumerate(lines):
         label = _label_of(line)
         if at < max(start, lead) or not line.strip() or label in COMPOSE_LABELS or line == COMPOSE_RESULT_VIDEO_LINE:
             full.append(line)
             plain.append(line)
+            plain_n.append(line)
             continue
         refs = _refs(line)
         if label.startswith("DIALOGUE") and not refs:
@@ -3629,12 +3631,18 @@ def _soft_prompt(prompt: str) -> tuple[str, dict]:
         info["softenedLines"] += int(softened != dropped)
         if dropped.strip():
             plain.append(dropped)
+        neutral = generate._intimacy_neutral(dropped)  # noqa: SLF001 — 작업 233
+        if _refs(neutral) != refs:
+            neutral = dropped
+        if neutral.strip():
+            plain_n.append(neutral)
         if softened.strip():
             full.append(softened)
     had_rule = generate.has_audio_rule(prompt)
     at = start - 1 if start else lead  # compose result: CONTEXT 줄 앞(머리 — _drop_context 가 빼지 않는다), 아니면 맨 앞(214: 고지 다음)
     full, added = _silent_audio(full, had_rule, at)  # 작업 211: 대사를 뺐으니 소리 = 침묵만
     plain, _added = _silent_audio(plain, had_rule, at)
+    plain_n, _added = _silent_audio(plain_n, had_rule, at)
     if added and start:
         start += 1
     limit = _bytes_of(prompt)
@@ -3643,7 +3651,9 @@ def _soft_prompt(prompt: str) -> tuple[str, dict]:
         kept, _dropped = _drop_context(full, max(start, lead + int(added and not start)) if lead else start, limit)
         out = "\n".join(kept)
         if _bytes_of(out) > limit:
-            out = "\n".join(plain)
+            out = "\n".join(plain_n)  # 작업 233: 빼기 + 중립 연출, 그래도 넘으면 지금처럼 빼기만
+            if _bytes_of(out) > limit:
+                out = "\n".join(plain)
             info["softenedLines"] = 0
     return out, info
 

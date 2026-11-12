@@ -46,9 +46,11 @@ FLAG_MSG = "The content could not be processed because it contained material fla
 NOTE_TEXT = "콘텐츠 검사에서 다시 거절돼, 원작 패널 그림을 빼고 한 번 더 시도하는 중입니다."
 FAIL_SENTENCE = " 원작 패널 없이도 거절됐습니다."
 # 고치기 전(작업 232 전) 코드에서 --baseline 으로 뽑은 sha. 바꾸면 안 된다.
+# 233: 두 고정 글의 "just before the kiss" 가 195 순화 다시 내기에서 "faces close together" 로 바뀐다(233 을 끄면 옛 sha
+# a66bd96a5bc13e87 / ed47f5a953200984 그대로 — 바뀐 것은 둘째 제출 프롬프트 글뿐).
 OLD_SHA = {
-    "dr-c": "a66bd96a5bc13e87",
-    "dr-d": "ed47f5a953200984",
+    "dr-c": "f764175aaff7ac1b",  # 233
+    "dr-d": "613d51950112446b",  # 233
 }
 CHANGED = ("app/src/vnew/retake.py", "app/src/vnew/generate.py", "tools/check_retake_droprefs_232.py")
 
