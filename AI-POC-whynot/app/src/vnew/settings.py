@@ -265,6 +265,9 @@ VNEW_PREPARE_STALE_S = _int("VNEW_PREPARE_STALE_S", 300)
 # 프리비즈 승인 관문(설계자 2026-10-21, 지시서 049·④). 모든 컷의 시점 일치도(fit.match)가 이 값
 # 이상이어야 승인된다(force 로 넘길 수 있다). match 가 null(판정 불가)인 컷도 낮은 컷으로 센다.
 VNEW_PREVIZ_APPROVE_MIN = _float("VNEW_PREVIZ_APPROVE_MIN", 0.7)
+# 작업 231: 승인 관문 자체를 켤지(코드 기본, 템플릿에 넣지 않는다). false(기본)면 일치도가 0% 여도 승인된다 —
+# 낮은 컷은 그대로 세고 approvedForced={at,lowCuts} 로 남긴다. true 면 위 하한 미만에서 409 LowMatch(옛 동작).
+VNEW_PREVIZ_MATCH_GATE = False
 
 # 프리비즈 소품 관통 보정(084 R1, 2026-10-28). 켜면 서버가 앉을 소품·엉덩이 높이·다리 방향·각도를 정하고
 # 인물이 소품과 겹치면 밀어낸다(설계 저장 전 2회, 보기 때 사본에). false 면 지금 동작(보정·sit 없음,

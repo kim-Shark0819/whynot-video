@@ -7536,7 +7536,7 @@
       host.appendChild(staleBox);
     }
 
-    if (lowCuts.length && !alreadyApproved) {
+    if (lowCuts.length && !alreadyApproved && previz.matchGate) {
       // 낮은 컷 안내 + 번호 나열(70% 미만). 승인 버튼은 비활성.
       btn.disabled = true;
       var minPct = Math.round((Number(previz.approveMinMatch) || 0.7) * 100);
@@ -7561,6 +7561,14 @@
       });
       warn.appendChild(forceLink);
       host.appendChild(warn);
+    } else if (lowCuts.length && !alreadyApproved) {
+      // 작업 231: 관문 꺼짐(기본) — 낮은 컷은 안내만 하고 승인은 막지 않는다(링크·확인 창 없음).
+      var infoPct = Math.round((Number(previz.approveMinMatch) || 0.7) * 100);
+      var infoNums = lowCuts.map(function (c) { return "컷 " + c.no; }).join(", ");
+      host.appendChild(el("p", "vnew-hint vnew-previz-lowmatch-info",
+        "시점 일치도 " + infoPct + "% 미만 컷: " + infoNums +
+        " — 그대로 진행해도 됩니다. 결과가 웹툰과 다를 수 있어요."));
+      btn.disabled = busy;
     } else {
       btn.disabled = busy;
     }

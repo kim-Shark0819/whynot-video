@@ -7659,16 +7659,22 @@ def check_vnew_previz() -> None:
         scenes = (client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}).get("previz", {}).get("scenes") or scenes
 
         # --- (pg-f) approve 70% 관문: 낮은 컷(c4 match null) 있으면 409 LowMatch(컷 번호), force 면 승인 ---
-        resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={})
-        body = resp.get_json() or {}
-        if resp.status_code != 409 or (body.get("error") or {}).get("type") != "LowMatch":
-            bad.append(f"(pg-f) 낮은 컷이 있는데 approve 가 409 LowMatch 가 아닙니다: {resp.status_code} {body}")
-        else:
-            msg = (body.get("error") or {}).get("message") or ""
-            if "컷" not in msg:
-                bad.append(f"(pg-f) LowMatch 메시지에 컷 번호가 없습니다: {msg}")
-        # force=True → 승인 + approvedForced 기록.
-        resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={"force": True})
+        # 작업 231: 관문은 기본 꺼짐(VNEW_PREVIZ_MATCH_GATE=False) — 이 검사는 관문을 켜고 옛 동작을 고정한다.
+        _gate231 = pvmod.vnew_settings.VNEW_PREVIZ_MATCH_GATE  # 231
+        pvmod.vnew_settings.VNEW_PREVIZ_MATCH_GATE = True  # 231
+        try:  # 231
+            resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={})
+            body = resp.get_json() or {}
+            if resp.status_code != 409 or (body.get("error") or {}).get("type") != "LowMatch":
+                bad.append(f"(pg-f) 낮은 컷이 있는데 approve 가 409 LowMatch 가 아닙니다: {resp.status_code} {body}")
+            else:
+                msg = (body.get("error") or {}).get("message") or ""
+                if "컷" not in msg:
+                    bad.append(f"(pg-f) LowMatch 메시지에 컷 번호가 없습니다: {msg}")
+            # force=True → 승인 + approvedForced 기록.
+            resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={"force": True})
+        finally:  # 231
+            pvmod.vnew_settings.VNEW_PREVIZ_MATCH_GATE = _gate231  # 231
         pv2 = (resp.get_json() or {}).get("previz") or {}
         if resp.status_code != 200 or not pv2.get("approved"):
             bad.append(f"(pg-f) force 승인이 200·approved 가 아닙니다: {resp.status_code} approved={pv2.get('approved')}")
@@ -68909,6 +68915,7 @@ def main() -> int:
     if not __import__("check_anime_likeness_228").check_anime_likeness_228(): fail("작업 228: 애니 테이크 likeness 거절 → Wan 3.0 1번 대체 검사 실패")
     if not __import__("check_anime_kling_229").check_anime_kling_229(): fail("작업 229: 애니 테이크 조각 모든 모델 거절 → Kling O3 컷 단위 검사 실패")
     if not __import__("check_real_tod_230").check_real_tod_230(): fail("작업 230: 실사 시간대 부정 낱말 · 우선순위 · 죽은 Seedance 건너뛰기 검사 실패")
+    if not __import__("check_previz_nogate_231").check_previz_nogate_231(): fail("작업 231: 프리비즈 일치도 관문 끔(0%도 승인) · 안내만 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
